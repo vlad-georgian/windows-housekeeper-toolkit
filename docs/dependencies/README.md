@@ -15,10 +15,10 @@ handling, scrolling, redraws, and cancellation. [Clack prompts](https://bomb.sh/
 
 ### `@optique/core` 1.2.4
 
-Optique's `or` combinator expresses the mutually exclusive `--all` and
-`--app ID` modes in the grammar. Node's `util.parseArgs` leaves that
-cross-option check to the caller. Commander can declare conflicting
-options, while Optique also provides the typed branch result this CLI maps
+Optique's `multiple` and `choice` combinators express the repeatable
+`--category` option with its allowed values in the grammar. Node's
+`util.parseArgs` leaves value validation to the caller. Commander can
+restrict choices, while Optique also provides the typed result this CLI maps
 into `CliOptions`. [Optique](https://optique.dev/), [Node parseArgs](https://nodejs.org/api/util.html#utilparseargsconfig), [Commander](https://github.com/tj/commander.js)
 
 ### `@optique/run` 1.2.4

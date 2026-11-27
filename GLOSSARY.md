@@ -16,6 +16,14 @@ Removal of regenerable application data that leaves ordinary application use int
 
 Removal of rebuildable stores whose absence can require redownloads or prevent offline use.
 
+**Cleanup category**
+
+A class of cleanup candidates grouped by what the underlying data is: general cache cleanup, destructive cache cleanup, or old data and installations. Unattended runs name the categories they include.
+
+**Combined plan**
+
+The single summary of every selection gathered from the launch menu, confirmed once before any change is applied.
+
 **Superseded installation**
 
 An installed release replaced within its own release channel. A selected release in one channel remains active even if another channel has a higher version number.

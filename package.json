@@ -9,7 +9,8 @@
     "type": "module",
     "scripts": {
         "start": "bun run src/index.ts",
-        "scan": "bun run src/index.ts --dry-run --all",
+        "scan": "bun run src/index.ts --dry-run --category general-cache --category destructive-cache --category old-installations",
+        "test": "bun test",
         "typecheck": "vp check --no-fmt --no-lint",
         "lint": "vp lint",
         "lint:fix": "vp lint --fix",
