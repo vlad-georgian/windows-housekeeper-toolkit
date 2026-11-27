@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { link, mkdir, readFile, readdir, rm, symlink } from 'node:fs/promises'
+import { link, mkdir, readFile, readdir, rename, rm, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { createSandbox, type Sandbox } from '../../test-support/fixtures.ts'
+import { rejection } from '../../test-support/rejection.ts'
 import type { RemovedEntry } from '../types.ts'
 import { createFilesystemCandidate, pathExists, removeFilesystemCandidate } from './index.ts'
 
@@ -86,5 +87,37 @@ describe('links inside a verified tree', () => {
         await symlink(target, join(sandbox.root, release), 'junction')
 
         expect(await createFilesystemCandidate({ ...candidateOptions(), unlinkTreeLinks: true })).toBeNull()
+    })
+
+    test('never unlink an entry outside the tree when a containing directory is replaced during removal', async () => {
+        await sandbox.file(join(release, 'package.json'), '{}')
+        await sandbox.file(join(release, 'node_modules', 'one'), '1')
+        const inside = await sandbox.directory(join(release, 'node_modules', 'inside'))
+        await symlink(inside, join(sandbox.root, release, 'node_modules', 'two'), 'junction')
+        // The directory that will be swapped in holds its own `two` link and file, which are not part of the tree.
+        const elsewhere = await sandbox.directory(join('Users', 'test', 'elsewhere'))
+        const kept = await sandbox.file(join('Users', 'test', 'kept', 'data.txt'), 'kept')
+        await symlink(join(sandbox.root, 'Users', 'test', 'kept'), join(elsewhere, 'two'), 'junction')
+        await sandbox.file(join('Users', 'test', 'elsewhere', 'three'), '3')
+        const candidate = await createFilesystemCandidate({ ...candidateOptions(), unlinkTreeLinks: true })
+        if (!candidate) throw new Error('Expected a candidate.')
+        let swapped = false
+
+        const failure = await rejection(
+            removeFilesystemCandidate(candidate, {
+                onRemoved: async (entry) => {
+                    if (swapped || !entry.path.endsWith('one')) return
+                    swapped = true
+                    const modules = join(sandbox.root, release, 'node_modules')
+                    await rename(modules, join(sandbox.root, release, 'moved'))
+                    await symlink(elsewhere, modules, 'junction')
+                }
+            })
+        )
+
+        expect(swapped).toBe(true)
+        expect(failure).toBeInstanceOf(Error)
+        expect((await readdir(elsewhere)).toSorted()).toEqual(['three', 'two'])
+        expect(await readFile(kept, 'utf8')).toBe('kept')
     })
 })
