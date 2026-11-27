@@ -10,7 +10,9 @@ import {
 } from "../../core/filesystem/index.ts";
 import type { SystemPaths } from "../../core/system-paths.ts";
 import type { CleanupCandidate, RemovalResult } from "../../core/types.ts";
-import { listWindowsProcesses } from "../../windows/processes.ts";
+import { listWindowsProcesses, type WindowsProcess } from "../../windows/processes.ts";
+
+export type ProcessLister = () => Promise<readonly WindowsProcess[]>;
 import { scoopRoot } from "../helpers.ts";
 import {
     canRemoveRelease,
@@ -23,10 +25,10 @@ const npmRemnant = /^(?:\.codex-[\w-]+|codex-(?:old|backup|staging)-[\w-]+)$/i;
 const packageProcess =
     /^(?:codex(?:-code-mode-host|-exec-server|-command-runner|-windows-sandbox-setup)?|rg)(?:\.exe)?$/i;
 
-async function runningPackagePaths(): Promise<string[] | null> {
+async function runningPackagePaths(listProcesses: ProcessLister): Promise<string[] | null> {
     try {
         const paths = new Set<string>();
-        for (const entry of await listWindowsProcesses()) {
+        for (const entry of await listProcesses()) {
             if (!packageProcess.test(entry.name)) continue;
             if (!entry.path || !isAbsolute(entry.path)) return null;
             paths.add(entry.path);
@@ -61,8 +63,9 @@ function npmRoots(paths: SystemPaths): string[] {
 export async function detectCodexInstallations(
     codexHome: string,
     paths: SystemPaths,
+    listProcesses: ProcessLister = listWindowsProcesses,
 ): Promise<CleanupCandidate[]> {
-    const processes = await runningPackagePaths();
+    const processes = await runningPackagePaths(listProcesses);
     if (processes === null) return [];
 
     const candidates: CleanupCandidate[] = [];
@@ -114,11 +117,12 @@ export async function removeCodexInstallation(
     candidate: CleanupCandidate,
     codexHome: string,
     remove: () => Promise<RemovalResult>,
+    listProcesses: ProcessLister = listWindowsProcesses,
 ): Promise<RemovalResult> {
     const path = candidate.canonicalPath;
     if (!path) throw new Error(`Missing verified path for ${candidate.displayName}.`);
     const name = basename(path);
-    const processes = await runningPackagePaths();
+    const processes = await runningPackagePaths(listProcesses);
     if (processes === null || releaseIsInUse(path, processes)) {
         throw new Error(`Could not verify that ${candidate.displayName} is inactive.`);
     }

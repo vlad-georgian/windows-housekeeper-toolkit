@@ -20,6 +20,10 @@ Removal of rebuildable stores whose absence can require redownloads or prevent o
 
 A class of cleanup candidates grouped by what the underlying data is: general cache cleanup, destructive cache cleanup, or old data and installations. Unattended runs name the categories they include.
 
+**Launch menu**
+
+The interactive starting checklist of operations, such as removing caches or old data and installations. Every operation starts unchecked.
+
 **Combined plan**
 
 The single summary of every selection gathered from the launch menu, confirmed once before any change is applied.

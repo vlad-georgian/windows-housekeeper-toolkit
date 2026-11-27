@@ -6,7 +6,8 @@ import { BaseCleaner } from "../base-cleaner.ts";
 import { chromiumCaches, detectNamedCaches } from "../helpers.ts";
 
 export class GitHubDesktopCacheCleaner extends BaseCleaner {
-    readonly id = "github-desktop";
+    // Not "github-desktop": that saved sign-in ID previously meant old-version cleanup.
+    readonly id = "github-desktop-cache";
     readonly appId = "github-desktop";
     readonly category = "general-cache";
     readonly label = "GitHub Desktop";

@@ -6,7 +6,11 @@ import {
     type LaunchPrompts,
     type PlanSection,
 } from "../launch/types.ts";
-import { categoriesForOperation, type CleanupOperationId } from "./categories.ts";
+import {
+    categoriesForOperation,
+    cleanersForCategories,
+    type CleanupOperationId,
+} from "./categories.ts";
 import { runCleanup } from "./remove.ts";
 import { deduplicate, optionHint, scan } from "./scan.ts";
 import type { CleanupSummary } from "./summary.ts";
@@ -60,8 +64,9 @@ function createCleanupOperation(
         id,
         label,
         async gather(prompts: LaunchPrompts): Promise<PlanSection | null | typeof cancelled> {
-            const inScope = cleaners.filter((cleaner) =>
-                categories.some((category) => category.id === cleaner.category),
+            const inScope = cleanersForCategories(
+                cleaners,
+                categories.map((category) => category.id),
             );
             prompts.log(`Scanning ${inScope.length} cleaners for ${label.toLowerCase()}…`);
             const results = await scan(inScope, session.audit, session.summary, false);
