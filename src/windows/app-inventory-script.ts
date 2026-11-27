@@ -76,4 +76,4 @@ export const appInventoryScript = String.raw`
       }
     )
     [pscustomobject]@{ installs = $installs; packages = $packages; services = $services; warnings = $warnings } | ConvertTo-Json -Depth 6 -Compress
-  `;
+  `

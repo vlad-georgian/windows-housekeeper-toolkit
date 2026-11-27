@@ -1,74 +1,64 @@
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-import { projectName, readState, stateDirectory, writeState } from "../core/state.ts";
-import type { SystemPaths } from "../core/system-paths.ts";
-import type { AppCleaner } from "../core/types.ts";
-import { registerNotificationIdentity } from "./notification.ts";
-import { powershellPath, runPowerShell } from "./powershell.ts";
-import { hasProcessGuard } from "./processes.ts";
+import { projectName, readState, stateDirectory, writeState } from '../core/state.ts'
+import type { SystemPaths } from '../core/system-paths.ts'
+import type { AppCleaner } from '../core/types.ts'
+import { registerNotificationIdentity } from './notification.ts'
+import { powershellPath, runPowerShell } from './powershell.ts'
+import { hasProcessGuard } from './processes.ts'
 
 interface SignInSettings {
-    readonly cleanupEnabled: boolean;
-    readonly cleanupApps: readonly string[];
-    readonly enforcementEnabled: boolean;
+    readonly cleanupEnabled: boolean
+    readonly cleanupApps: readonly string[]
+    readonly enforcementEnabled: boolean
 }
 
-const stateFile = "signin.json";
-const entrypoint = fileURLToPath(new URL("../index.ts", import.meta.url));
-const help = [
-    "signin status",
-    "signin cleanup enable --apps ID,ID",
-    "signin cleanup disable",
-    "signin enforcement enable|disable",
-];
+const stateFile = 'signin.json'
+const entrypoint = fileURLToPath(new URL('../index.ts', import.meta.url))
+const help = ['signin status', 'signin cleanup enable --apps ID,ID', 'signin cleanup disable', 'signin enforcement enable|disable']
 
 export function signInLogDirectory(paths: SystemPaths): string {
-    return join(stateDirectory(paths), "logs");
+    return join(stateDirectory(paths), 'logs')
 }
 
 export async function readSignInSettings(paths: SystemPaths): Promise<SignInSettings> {
     const saved = await readState<SignInSettings>(paths, stateFile, {
         cleanupEnabled: false,
         cleanupApps: [],
-        enforcementEnabled: false,
-    });
+        enforcementEnabled: false
+    })
     if (
         !saved ||
-        typeof saved.cleanupEnabled !== "boolean" ||
-        typeof saved.enforcementEnabled !== "boolean" ||
+        typeof saved.cleanupEnabled !== 'boolean' ||
+        typeof saved.enforcementEnabled !== 'boolean' ||
         !Array.isArray(saved.cleanupApps) ||
-        !saved.cleanupApps.every((id) => typeof id === "string") ||
+        !saved.cleanupApps.every((id) => typeof id === 'string') ||
         (saved.cleanupEnabled && saved.cleanupApps.length === 0)
     ) {
-        throw new Error("Invalid sign-in settings.");
+        throw new Error('Invalid sign-in settings.')
     }
-    return saved;
+    return saved
 }
 
-export function selectSignInCleaners(
-    cleaners: readonly AppCleaner[],
-    appIds: readonly string[],
-): AppCleaner[] {
-    const byId = new Map(cleaners.map((cleaner) => [cleaner.id, cleaner]));
+export function selectSignInCleaners(cleaners: readonly AppCleaner[], appIds: readonly string[]): AppCleaner[] {
+    const byId = new Map(cleaners.map((cleaner) => [cleaner.id, cleaner]))
     return [...new Set(appIds)].map((id) => {
-        const cleaner = byId.get(id);
+        const cleaner = byId.get(id)
         if (!cleaner || !hasProcessGuard(id)) {
-            throw new Error(`"${id}" is unavailable for sign-in cleanup.`);
+            throw new Error(`"${id}" is unavailable for sign-in cleanup.`)
         }
-        return cleaner;
-    });
+        return cleaner
+    })
 }
 
 function quotePowerShell(value: string): string {
-    return "'" + value.replaceAll("'", "''") + "'";
+    return "'" + value.replaceAll("'", "''") + "'"
 }
 
-async function syncTask(mode: "status" | "register" | "remove"): Promise<string> {
-    const command = `& ${quotePowerShell(process.execPath)} 'run' ${quotePowerShell(entrypoint)} 'signin' 'run'; exit $LASTEXITCODE`;
-    const args =
-        "-NoProfile -NoLogo -NonInteractive -WindowStyle Hidden -EncodedCommand " +
-        Buffer.from(command, "utf16le").toString("base64");
+async function syncTask(mode: 'status' | 'register' | 'remove'): Promise<string> {
+    const command = `& ${quotePowerShell(process.execPath)} 'run' ${quotePowerShell(entrypoint)} 'signin' 'run'; exit $LASTEXITCODE`
+    const args = '-NoProfile -NoLogo -NonInteractive -WindowStyle Hidden -EncodedCommand ' + Buffer.from(command, 'utf16le').toString('base64')
     return runPowerShell(
         `
       $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -118,79 +108,61 @@ async function syncTask(mode: "status" | "register" | "remove"): Promise<string>
             name: projectName,
             shell: powershellPath(),
             arguments: args,
-            directory: dirname(dirname(entrypoint)),
-        },
-    );
+            directory: dirname(dirname(entrypoint))
+        }
+    )
 }
 
-export async function runSignInSettings(
-    paths: SystemPaths,
-    cleaners: readonly AppCleaner[],
-    args: readonly string[],
-): Promise<void> {
-    const [feature, action, flag, value] = args;
-    if (args.length === 0 || (args.length === 1 && feature === "--help")) {
-        console.log(help.join("\n"));
-        return;
+export async function runSignInSettings(paths: SystemPaths, cleaners: readonly AppCleaner[], args: readonly string[]): Promise<void> {
+    const [feature, action, flag, value] = args
+    if (args.length === 0 || (args.length === 1 && feature === '--help')) {
+        console.log(help.join('\n'))
+        return
     }
-    const saved = await readSignInSettings(paths);
-    if (feature === "status" && args.length === 1) {
-        console.log(`Sign-in cleanup ${saved.cleanupEnabled ? "enabled" : "disabled"}`);
-        console.log(`Selected apps: ${saved.cleanupApps.join(", ") || "none"}`);
-        console.log(
-            `Startup preference enforcement ${saved.enforcementEnabled ? "enabled" : "disabled"}`,
-        );
+    const saved = await readSignInSettings(paths)
+    if (feature === 'status' && args.length === 1) {
+        console.log(`Sign-in cleanup ${saved.cleanupEnabled ? 'enabled' : 'disabled'}`)
+        console.log(`Selected apps: ${saved.cleanupApps.join(', ') || 'none'}`)
+        console.log(`Startup preference enforcement ${saved.enforcementEnabled ? 'enabled' : 'disabled'}`)
         try {
-            console.log(`Windows task: ${await syncTask("status")}`);
+            console.log(`Windows task: ${await syncTask('status')}`)
         } catch (error) {
-            console.log(`Windows task status unavailable: ${String(error)}`);
+            console.log(`Windows task status unavailable: ${String(error)}`)
         }
-        return;
+        return
     }
 
-    let next: SignInSettings;
-    if (
-        feature === "cleanup" &&
-        action === "enable" &&
-        flag === "--apps" &&
-        value &&
-        args.length === 4
-    ) {
+    let next: SignInSettings
+    if (feature === 'cleanup' && action === 'enable' && flag === '--apps' && value && args.length === 4) {
         const selected = selectSignInCleaners(
             cleaners,
-            value.split(",").map((id) => id.trim()),
-        );
-        await registerNotificationIdentity(paths);
+            value.split(',').map((id) => id.trim())
+        )
+        await registerNotificationIdentity(paths)
         next = {
             ...saved,
             cleanupEnabled: true,
-            cleanupApps: selected.map((cleaner) => cleaner.id),
-        };
-    } else if (feature === "cleanup" && action === "disable" && args.length === 2) {
-        next = { ...saved, cleanupEnabled: false };
-    } else if (
-        feature === "enforcement" &&
-        (action === "enable" || action === "disable") &&
-        args.length === 2
-    ) {
-        next = { ...saved, enforcementEnabled: action === "enable" };
+            cleanupApps: selected.map((cleaner) => cleaner.id)
+        }
+    } else if (feature === 'cleanup' && action === 'disable' && args.length === 2) {
+        next = { ...saved, cleanupEnabled: false }
+    } else if (feature === 'enforcement' && (action === 'enable' || action === 'disable') && args.length === 2) {
+        next = { ...saved, enforcementEnabled: action === 'enable' }
     } else {
-        const ids = cleaners
-            .filter((cleaner) => hasProcessGuard(cleaner.id))
-            .map((cleaner) => cleaner.id);
-        throw new Error(`${help.join("\n")}\nAvailable cleanup IDs: ${ids.join(", ")}`);
+        const ids = cleaners.filter((cleaner) => hasProcessGuard(cleaner.id)).map((cleaner) => cleaner.id)
+        throw new Error(`${help.join('\n')}\nAvailable cleanup IDs: ${ids.join(', ')}`)
     }
 
-    await writeState(paths, stateFile, next);
-    if (action === "enable") {
+    await writeState(paths, stateFile, next)
+    if (action === 'enable') {
         try {
-            await syncTask("register");
+            await syncTask('register')
         } catch (error) {
-            await writeState(paths, stateFile, saved);
-            throw error;
+            await writeState(paths, stateFile, saved)
+            throw error
         }
     } else if (!next.cleanupEnabled && !next.enforcementEnabled) {
-        await syncTask("remove");
+        await syncTask('remove')
     }
-    console.log(`Sign-in ${feature} ${action}d.`);
+    console.log(`Sign-in ${feature} ${action}d.`)
 }

@@ -1,31 +1,31 @@
-import { runPowerShell } from "./powershell.ts";
+import { runPowerShell } from './powershell.ts'
 
 export interface WindowsProcess {
-    readonly id: number;
-    readonly name: string;
-    readonly path?: string | null;
-    readonly commandLine?: string | null;
+    readonly id: number
+    readonly name: string
+    readonly path?: string | null
+    readonly commandLine?: string | null
 }
 
 function isWindowsProcess(value: unknown): value is WindowsProcess {
     return (
-        typeof value === "object" &&
+        typeof value === 'object' &&
         value !== null &&
-        "id" in value &&
-        typeof value.id === "number" &&
-        "name" in value &&
-        typeof value.name === "string" &&
-        "path" in value &&
-        (typeof value.path === "string" || value.path === null) &&
-        "commandLine" in value &&
-        (typeof value.commandLine === "string" || value.commandLine === null)
-    );
+        'id' in value &&
+        typeof value.id === 'number' &&
+        'name' in value &&
+        typeof value.name === 'string' &&
+        'path' in value &&
+        (typeof value.path === 'string' || value.path === null) &&
+        'commandLine' in value &&
+        (typeof value.commandLine === 'string' || value.commandLine === null)
+    )
 }
 
-let cimUnavailable = false;
+let cimUnavailable = false
 
 export async function listWindowsProcesses(): Promise<WindowsProcess[]> {
-    let output: string | undefined;
+    let output: string | undefined
     if (!cimUnavailable) {
         try {
             output = await runPowerShell(
@@ -36,10 +36,10 @@ export async function listWindowsProcesses(): Promise<WindowsProcess[]> {
         ConvertTo-Json -InputObject $items -Compress
       `,
                 undefined,
-                5_000,
-            );
+                5_000
+            )
         } catch {
-            cimUnavailable = true;
+            cimUnavailable = true
         }
     }
     output ??= await runPowerShell(
@@ -50,72 +50,66 @@ export async function listWindowsProcesses(): Promise<WindowsProcess[]> {
       ConvertTo-Json -InputObject $items -Compress
   `,
         undefined,
-        5_000,
-    );
-    const processes: unknown = JSON.parse(output);
+        5_000
+    )
+    const processes: unknown = JSON.parse(output)
     if (!Array.isArray(processes) || !processes.every(isWindowsProcess) || processes.length === 0) {
-        throw new Error("Windows did not return a valid running process inventory.");
+        throw new Error('Windows did not return a valid running process inventory.')
     }
-    return processes;
+    return processes
 }
 
 // Include updater and companion processes that can write into the selected app's caches.
 const processNames: Readonly<Record<string, RegExp>> = {
-    "signal-rgb": /^(signalrgb|vortxengine|signalrgblauncher|signalrgbcore)([ ._-]|$)/i,
+    'signal-rgb': /^(signalrgb|vortxengine|signalrgblauncher|signalrgbcore)([ ._-]|$)/i,
     vortex: /^vortex([ ._-]|$)/i,
-    "t3-code": /^t3[ -]?code([ ._-]|$)/i,
+    't3-code': /^t3[ -]?code([ ._-]|$)/i,
     obsidian: /^obsidian([ ._-]|$)/i,
-    "github-desktop": /^githubdesktop([ ._-]|$)/i,
+    'github-desktop': /^githubdesktop([ ._-]|$)/i,
     notion: /^notion([ ._-]|$)/i,
     chatbox: /^chatbox([ ._-]|$)/i,
-    "claude-code": /^claude([ ._-]|$)/i,
-    "claude-desktop": /^claude([ ._-]|$)/i,
+    'claude-code': /^claude([ ._-]|$)/i,
+    'claude-desktop': /^claude([ ._-]|$)/i,
     codex: /^(codex|chatgpt)([ ._-]|$)/i,
-    "npm-cache": /^(node|npm|npx)([ ._-]|$)/i,
-    "nuget-cache": /^(nuget|choco|dotnet|msbuild|devenv)([ ._-]|$)/i,
-    "amd-installers":
-        /^(setup|amdsoftwareinstaller|amd-software|radeoninstaller|amdcleanuputility)([ ._-]|$)/i,
+    'npm-cache': /^(node|npm|npx)([ ._-]|$)/i,
+    'nuget-cache': /^(nuget|choco|dotnet|msbuild|devenv)([ ._-]|$)/i,
+    'amd-installers': /^(setup|amdsoftwareinstaller|amd-software|radeoninstaller|amdcleanuputility)([ ._-]|$)/i,
     discord: /^discord([ ._-]|canary|ptb|$)/i,
     slack: /^slack([ ._-]|$)/i,
-    "balena-etcher": /^balenaetcher([ ._-]|$)/i,
+    'balena-etcher': /^balenaetcher([ ._-]|$)/i,
     linua: /^linua([ ._-]|$)/i,
     opencode: /^(opencode|open code)([ ._-]|$)/i,
-    vscode: /^code([ ._-]|$)/i,
-};
+    vscode: /^code([ ._-]|$)/i
+}
 
 const processLocations: Readonly<Record<string, RegExp>> = {
-    "signal-rgb": /[\\/](signalrgb|vortxengine)([\\/]|$)/i,
-    "github-desktop": /[\\/]githubdesktop[\\/]/i,
+    'signal-rgb': /[\\/](signalrgb|vortxengine)([\\/]|$)/i,
+    'github-desktop': /[\\/]githubdesktop[\\/]/i,
     discord: /[\\/]discord(?:canary|ptb)?[\\/]/i,
     slack: /[\\/]slack[\\/]/i,
-    "balena-etcher": /[\\/]balenaetcher[\\/]/i,
-    "t3-code": /[\\/](?:t3code(?:-updater)?|\.t3)[\\/]/i,
-    "claude-code": /[\\/]claude(?:-code)?[\\/]/i,
+    'balena-etcher': /[\\/]balenaetcher[\\/]/i,
+    't3-code': /[\\/](?:t3code(?:-updater)?|\.t3)[\\/]/i,
+    'claude-code': /[\\/]claude(?:-code)?[\\/]/i,
     codex: /[\\/](codex|\.codex)[\\/]/i,
-    opencode: /[\\/](ai\.opencode\.desktop|@opencodedesktop-updater|opencode)[\\/]/i,
-};
+    opencode: /[\\/](ai\.opencode\.desktop|@opencodedesktop-updater|opencode)[\\/]/i
+}
 
-const commandLineApps = new Set(["t3-code", "claude-code", "codex", "opencode"]);
+const commandLineApps = new Set(['t3-code', 'claude-code', 'codex', 'opencode'])
 
 export function hasProcessGuard(appId: string): boolean {
-    return Object.hasOwn(processNames, appId);
+    return Object.hasOwn(processNames, appId)
 }
 
 export function isAppRunning(appId: string, processes: readonly WindowsProcess[]): boolean {
-    const names = processNames[appId];
-    if (!names) throw new Error(`No running-app check is available for "${appId}".`);
-    const location = processLocations[appId];
+    const names = processNames[appId]
+    if (!names) throw new Error(`No running-app check is available for "${appId}".`)
+    const location = processLocations[appId]
     return processes.some((entry) => {
-        if (entry.id === process.pid) return false;
+        if (entry.id === process.pid) return false
         return (
             names.test(entry.name) ||
             Boolean(entry.path && location?.test(entry.path)) ||
-            Boolean(
-                /^(bun|node|update|squirrel)\.exe$/i.test(entry.name) &&
-                (entry.commandLine
-                    ? location?.test(entry.commandLine)
-                    : commandLineApps.has(appId)),
-            )
-        );
-    });
+            Boolean(/^(bun|node|update|squirrel)\.exe$/i.test(entry.name) && (entry.commandLine ? location?.test(entry.commandLine) : commandLineApps.has(appId)))
+        )
+    })
 }
