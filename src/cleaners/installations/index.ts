@@ -16,13 +16,17 @@ import { ScoopInstallationCleaner } from './scoop-cleaner.ts'
 import { SignalRgbCleaner } from './signal-rgb-cleaner.ts'
 import { SlackCleaner } from './slack-cleaner.ts'
 import { T3CodeCleaner } from './t3-code-cleaner.ts'
+import { VitePlusInstallationCleaner } from './vite-plus-cleaner.ts'
 import { VortexCleaner } from './vortex-cleaner.ts'
+import { VSCodeExtensionsCleaner } from './vscode-extensions-cleaner.ts'
 
 /** Old data and installation cleaners, in checklist order. */
 export function createInstallationCleaners(paths: SystemPaths): AppCleaner[] {
     return [
         new CodexInstallationCleaner(paths),
         new ClaudeCodeInstallationCleaner(paths),
+        new VitePlusInstallationCleaner(paths),
+        new VSCodeExtensionsCleaner(paths),
         new GitHubDesktopInstallationCleaner(paths),
         new DiscordInstallationCleaner(paths),
         new SlackCleaner(paths),
