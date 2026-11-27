@@ -12,6 +12,7 @@ state.
 | [`src/index.ts`](../../src/index.ts)           | Windows platform check, command dispatch, locking for Windows control commands, and top-level error reporting.           |
 | [`src/launch/`](cleanup.md)                    | Launch menu, operation registry, combined plan, and prompt adapter.                                                      |
 | [`src/cleanup/`](cleanup.md)                   | Cleanup categories and operations, unattended and sign-in cleanup, from detection through the audit summary.             |
+| [`src/startup/`](windows.md#startup)           | The automatic startup launch operation and its providers, such as current-user sign-in entries.                          |
 | [`src/cleaners/`](cleaners.md)                 | App-specific rules for recognizing and removing redundant payloads.                                                      |
 | [`src/core/`](core.md)                         | Shared types, filesystem verification, state, command execution, and formatting.                                         |
 | [`src/windows/`](windows.md)                   | Startup, updates, scheduled tasks, notifications, process inspection, and migration.                                     |
