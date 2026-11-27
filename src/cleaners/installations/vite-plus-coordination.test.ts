@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { rm, rmdir, symlink, writeFile } from 'node:fs/promises'
+import { realpath, rm, rmdir, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { pathExists } from '../../core/filesystem/index.ts'
@@ -68,16 +68,17 @@ describe('Vite+ installer coordination', () => {
 
     test('holds the real lock while it detects and releases it afterwards', async () => {
         await twoReleases()
-        const lockPath = await sandbox.file(join(legacyHome, '.install.lock'), '')
+        await sandbox.file(join(legacyHome, '.install.lock'), '')
+        const store = await realpath(join(sandbox.root, legacyHome))
         let heldDuringDetection = false
         const inspecting = async (): Promise<WindowsProcess[]> => {
-            heldDuringDetection = (await acquireInstallLock(lockPath)) === null
+            heldDuringDetection = (await acquireInstallLock(store)) === null
             return quietProcesses()
         }
 
         expect(await names(cleaner(inspecting, acquireInstallLock))).toEqual(['Vite+ 1.7.0'])
         expect(heldDuringDetection).toBe(true)
-        const again = await acquireInstallLock(lockPath)
+        const again = await acquireInstallLock(store)
         expect(again).not.toBeNull()
         again?.()
     })
@@ -212,5 +213,48 @@ describe('Vite+ legacy directory ambiguity', () => {
         await select('1.12.0', splitData)
 
         expect(await names()).toEqual(['Vite+ 1.11.0'])
+    })
+})
+
+const relocated = (name: string): string => join('Users', 'test', name)
+
+describe('Vite+ store identity', () => {
+    test('uses the store resolved before the lock even if the home link is retargeted while the lock is taken', async () => {
+        // The legacy home is a link to store A. Store B has its own releases, with a different set of old ones.
+        for (const version of ['1.7.0', '1.8.0']) await add(version, relocated('store-a'))
+        for (const version of ['1.5.0', '1.6.0', '1.7.1', '1.9.0']) await add(version, relocated('store-b'))
+        await select('1.8.0', relocated('store-a'))
+        await select('1.9.0', relocated('store-b'))
+        await symlink(join(sandbox.root, relocated('store-a')), join(sandbox.root, legacyHome), 'junction')
+        const retargetOnAcquire: InstallLockAcquirer = async () => {
+            await rmdir(join(sandbox.root, legacyHome))
+            await symlink(join(sandbox.root, relocated('store-b')), join(sandbox.root, legacyHome), 'junction')
+            return () => {}
+        }
+        const instance = cleaner(quietProcesses, retargetOnAcquire)
+
+        const candidates = await instance.detect()
+        const storeA = (await realpath(join(sandbox.root, relocated('store-a')))).toLowerCase()
+
+        expect(candidates.map((candidate) => candidate.displayName)).toEqual(['Vite+ 1.7.0'])
+        expect(candidates.every((candidate) => candidate.canonicalPath?.toLowerCase().startsWith(storeA))).toBe(true)
+        expect(await pathExists(join(sandbox.root, relocated('store-b'), '1.5.0'))).toBe(true)
+    })
+
+    test('removes only from the store that was detected, even if the home link is retargeted before removal', async () => {
+        for (const version of ['1.7.0', '1.8.0']) await add(version, relocated('store-a'))
+        for (const version of ['1.7.0', '1.8.0']) await add(version, relocated('store-b'))
+        await select('1.8.0', relocated('store-a'))
+        await select('1.8.0', relocated('store-b'))
+        await symlink(join(sandbox.root, relocated('store-a')), join(sandbox.root, legacyHome), 'junction')
+        const instance = cleaner()
+        const candidate = await firstCandidate(instance)
+        await rmdir(join(sandbox.root, legacyHome))
+        await symlink(join(sandbox.root, relocated('store-b')), join(sandbox.root, legacyHome), 'junction')
+
+        await instance.remove(candidate, noop)
+
+        expect(await pathExists(join(sandbox.root, relocated('store-a'), '1.7.0'))).toBe(false)
+        expect(await pathExists(join(sandbox.root, relocated('store-b'), '1.7.0', 'bin', 'vp.exe'))).toBe(true)
     })
 })

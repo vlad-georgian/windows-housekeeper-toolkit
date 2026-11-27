@@ -100,11 +100,11 @@ async function verifyRelease(home: string, name: string): Promise<boolean> {
 /**
  * Reads Vite+'s selected release (`current`) and the fallback recorded for `vp upgrade --rollback`
  * (`.previous-version`). Returns `null` unless both can be verified, so nothing is offered. Call
- * this only while holding the installation lock, because a rollback rewrites both.
+ * this only while holding the installation lock, because a rollback rewrites both. `canonicalHome`
+ * is the store resolved once, never an alias that could be retargeted.
  */
-async function inspectStore(home: string): Promise<ReleaseStore | null> {
+async function inspectStore(canonicalHome: string): Promise<ReleaseStore | null> {
     try {
-        const canonicalHome = await realpath(home)
         const current = join(canonicalHome, 'current')
         if (!(await lstat(current)).isSymbolicLink()) return null
         const activePath = await realpath(current)
@@ -118,18 +118,45 @@ async function inspectStore(home: string): Promise<ReleaseStore | null> {
 
         const retained = new Set([nameKey(active)])
         const fallback = join(canonicalHome, '.previous-version')
-        try {
-            await lstat(fallback)
-            const recorded = (await readSmallTextFile(fallback, canonicalHome))?.trim()
-            if (!recorded || !releaseName.test(recorded)) return null
-            retained.add(nameKey(recorded))
-        } catch (error) {
-            if (!isUnavailablePath(error)) throw error
+        // Only a confirmed absence means no fallback is recorded. Any other failure could hide one.
+        const recorded = await lstat(fallback).then(
+            () => 'present' as const,
+            (error: unknown) => (hasErrorCode(error, 'ENOENT') ? ('absent' as const) : ('unreadable' as const))
+        )
+        if (recorded === 'unreadable') return null
+        if (recorded === 'present') {
+            const marker = (await readSmallTextFile(fallback, canonicalHome))?.trim()
+            if (!marker || !releaseName.test(marker)) return null
+            retained.add(nameKey(marker))
+            // Rollback uses whatever the marker names, so a link there protects the release it really reaches.
+            const target = await resolveFallbackTarget(canonicalHome, marker)
+            if (target === null) return null
+            if (target) retained.add(nameKey(target))
         }
         return { home: canonicalHome, active, retained }
     } catch (error) {
         if (isUnavailablePath(error)) return null
         throw error
+    }
+}
+
+/**
+ * The release directory that the fallback marker really names. Returns `undefined` when the named
+ * directory is confirmed missing, the real directory's name when it exists directly in the store,
+ * and `null` when it exists but cannot be resolved there, which leaves the fallback ambiguous.
+ */
+async function resolveFallbackTarget(canonicalHome: string, marker: string): Promise<string | undefined | null> {
+    const named = join(canonicalHome, marker)
+    try {
+        await lstat(named)
+    } catch (error) {
+        return hasErrorCode(error, 'ENOENT') ? undefined : null
+    }
+    try {
+        const target = await realpath(named)
+        return canonicalPathKey(dirname(target)) === canonicalPathKey(canonicalHome) && baseVersion(basename(target)) !== null ? basename(target) : null
+    } catch {
+        return null
     }
 }
 
@@ -159,8 +186,13 @@ export class VitePlusInstallationCleaner extends BaseCleaner {
         super()
     }
 
-    /** Runs `action` while holding Vite+'s installation lock, or returns `null` if it cannot be taken. */
-    private async underLock<T>(home: string, action: () => Promise<T>): Promise<T | null> {
+    /**
+     * Resolves the store once, takes Vite+'s installation lock on that exact directory, and runs
+     * `action` with the canonical store. The action must use only that path, never the alias, so a
+     * link retargeted after resolution cannot send it to another store. Returns `null` if the
+     * store cannot be resolved or the lock cannot be taken.
+     */
+    private async underLock<T>(home: string, action: (canonicalHome: string) => Promise<T>): Promise<T | null> {
         let canonicalHome: string
         try {
             canonicalHome = await realpath(home)
@@ -168,35 +200,53 @@ export class VitePlusInstallationCleaner extends BaseCleaner {
             if (isUnavailablePath(error)) return null
             throw error
         }
-        const release = await this.acquireLock(join(canonicalHome, '.install.lock'))
+        const release = await this.acquireLock(canonicalHome)
         if (!release) return null
         try {
-            return await action()
+            return await action(canonicalHome)
         } finally {
             release()
         }
     }
 
     /** Whether a running process is, or could be running from, the release. Unverifiable counts as in use. */
-    private async inUse(release: string): Promise<boolean> {
-        const paths = await runningProcessPaths(this.listProcesses, vitePlusProcess)
-        const commandLines = await runtimeCommandLines(this.listProcesses, scriptRuntime)
-        return paths === null || commandLines === null || isPathInUse(release, paths) || isPathReferenced(release, commandLines)
+    private async inUse(releases: readonly string[], snapshot: ProcessLister): Promise<boolean> {
+        const paths = await runningProcessPaths(snapshot, vitePlusProcess)
+        const commandLines = await runtimeCommandLines(snapshot, scriptRuntime)
+        if (paths === null || commandLines === null) return true
+        // A command line names the release however the caller spelled it, such as through a relocated ~.vite-plus link.
+        return releases.some((release) => isPathInUse(release, paths) || isPathReferenced(release, commandLines))
+    }
+
+    /** One process inventory for a whole verification, so every release is judged against the same snapshot. */
+    private async processSnapshot(): Promise<ProcessLister> {
+        try {
+            const processes = await this.listProcesses()
+            return async () => processes
+        } catch (error) {
+            return () => Promise.reject(error)
+        }
     }
 
     async detect(): Promise<readonly CleanupCandidate[]> {
         const home = await dataDirectory(this.paths, this.environment)
         if (!home) return []
-        return (await this.underLock(home, () => this.detectLocked(home))) ?? []
+        return (await this.underLock(home, (canonicalHome) => this.detectLocked(canonicalHome, home))) ?? []
     }
 
-    private async detectLocked(home: string): Promise<CleanupCandidate[]> {
+    /** Every way a process can name a release: its physical path and the same name under the logical home. */
+    private spellings(canonicalHome: string, name: string, logicalHome: string | null): string[] {
+        return [...new Set([join(canonicalHome, name), ...(logicalHome ? [join(logicalHome, name)] : [])])]
+    }
+
+    private async detectLocked(home: string, logicalHome: string): Promise<CleanupCandidate[]> {
         const store = await inspectStore(home)
         if (!store) return []
+        const snapshot = await this.processSnapshot()
 
         const candidates: CleanupCandidate[] = []
         for (const name of await listDirectoryNames(store.home)) {
-            if (!(await canRemoveRelease(store, name)) || (await this.inUse(join(store.home, name)))) continue
+            if (!(await canRemoveRelease(store, name)) || (await this.inUse(this.spellings(store.home, name, logicalHome), snapshot))) continue
             const candidate = await createFilesystemCandidate({
                 id: `vite-plus:release:${name}`,
                 path: join(home, name),
@@ -218,13 +268,16 @@ export class VitePlusInstallationCleaner extends BaseCleaner {
         if (!path) throw new Error(`Missing verified path for ${candidate.displayName}.`)
         const name = basename(path)
         const home = dirname(path)
-        const result = await this.underLock(home, async () => {
+        const result = await this.underLock(home, async (canonicalHome) => {
+            // The candidate was detected in this exact store. A store that resolves elsewhere now is not it.
+            if (canonicalPathKey(canonicalHome) !== canonicalPathKey(home)) throw new Error(`The Vite+ store at ${home} now resolves elsewhere.`)
             // Read the selection and fallback only now that a rollback cannot change them.
-            const store = await inspectStore(home)
+            const store = await inspectStore(canonicalHome)
             if (!store || candidate.id !== `vite-plus:release:${name}` || !(await canRemoveRelease(store, name))) {
                 throw new Error(`The Vite+ release selection changed after detection at ${home}.`)
             }
-            if (await this.inUse(path)) throw new Error(`Could not verify that ${candidate.displayName} is inactive.`)
+            if (await this.inUse(this.spellings(canonicalHome, name, await dataDirectory(this.paths, this.environment)), await this.processSnapshot()))
+                throw new Error(`Could not verify that ${candidate.displayName} is inactive.`)
             return super.remove(candidate, callbacks)
         })
         if (!result) throw new Error(`Could not take the Vite+ installation lock at ${home}. The installer may be running.`)

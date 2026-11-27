@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { readFile, rmdir, symlink, writeFile } from 'node:fs/promises'
+import { readFile, realpath, rmdir, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { pathExists } from '../../core/filesystem/index.ts'
@@ -135,7 +135,7 @@ describe('Vite+ process and installer guards', () => {
         }
 
         expect(await names(cleaner(quietProcesses, {}, recording))).toEqual([])
-        expect(lockPaths).toEqual([join(sandbox.root, legacyHome, '.install.lock')])
+        expect(lockPaths.map((path) => path.toLowerCase())).toEqual([(await realpath(join(sandbox.root, legacyHome))).toLowerCase()])
     })
 })
 
@@ -258,5 +258,28 @@ describe('Vite+ removal', () => {
 
         expect(await rejection(cleaner(quietProcesses, {}, held).remove(candidate, noop))).toBeInstanceOf(Error)
         expect(await pathExists(join(sandbox.root, legacyHome, '1.7.0'))).toBe(true)
+    })
+
+    test('offers nothing when fallback data exists but cannot be read, and treats only a missing marker as absent', async () => {
+        await addRelease('1.7.0')
+        await addRelease('1.8.0')
+        await addRelease('1.9.0')
+        await select('1.9.0')
+        // Absent: nothing recorded, so both older releases are offered.
+        expect(await names()).toEqual(['Vite+ 1.7.0', 'Vite+ 1.8.0'])
+
+        // A directory in place of the marker file cannot be read as a fallback.
+        await sandbox.directory(join(legacyHome, '.previous-version'))
+        expect(await names()).toEqual([])
+        await rmdir(join(sandbox.root, legacyHome, '.previous-version'))
+
+        // A marker that denies reads is unreadable too, not absent.
+        const marker = await sandbox.file(join(legacyHome, '.previous-version'), '1.8.0')
+        Bun.spawnSync(['icacls', marker, '/deny', '*S-1-1-0:(R)'])
+        try {
+            expect(await names()).toEqual([])
+        } finally {
+            Bun.spawnSync(['icacls', marker, '/remove:d', '*S-1-1-0'])
+        }
     })
 })
