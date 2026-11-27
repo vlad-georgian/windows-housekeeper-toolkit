@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { symlink } from "node:fs/promises";
 import { join } from "node:path";
 
+import {
+    addCodexRelease,
+    codexStorePath,
+    selectCodexRelease,
+} from "../../test-support/codex-fixtures.ts";
 import { createSandbox, type Sandbox } from "../../test-support/fixtures.ts";
 import { canRemoveRelease, inspectReleaseStore } from "./codex-release-store.ts";
 
-const target = "x86_64-pc-windows-msvc";
 let sandbox: Sandbox;
 let codexHome: string;
 
@@ -15,35 +18,11 @@ beforeEach(async () => {
 });
 afterEach(() => sandbox.dispose());
 
-function storePath(store: string, ...parts: string[]): string {
-    return join("Users", "test", ".codex", "packages", store, ...parts);
-}
-
-async function addRelease(store: string, version: string, manifest?: object): Promise<string> {
-    const name = `${version}-${target}`;
-    await sandbox.file(
-        storePath(store, "releases", name, "codex-package.json"),
-        JSON.stringify(
-            manifest ?? {
-                layoutVersion: 1,
-                version,
-                target,
-                variant: store === "standalone" ? "codex" : "codex-app-server",
-                entrypoint: "bin/codex.exe",
-            },
-        ),
-    );
-    await sandbox.file(storePath(store, "releases", name, "bin", "codex.exe"));
-    return name;
-}
-
-async function select(store: string, version: string): Promise<void> {
-    await symlink(
-        join(sandbox.root, storePath(store, "releases", `${version}-${target}`)),
-        join(sandbox.root, storePath(store, "current")),
-        "junction",
-    );
-}
+const storePath = codexStorePath;
+const addRelease = (store: string, version: string, manifest?: object): Promise<string> =>
+    addCodexRelease(sandbox, store, version, manifest);
+const select = (store: string, version: string): Promise<void> =>
+    selectCodexRelease(sandbox, store, version);
 
 async function removable(store: string, names: readonly string[]): Promise<string[]> {
     const inspected = await inspectReleaseStore(codexHome, store);

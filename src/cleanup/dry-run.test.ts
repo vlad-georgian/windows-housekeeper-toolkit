@@ -3,10 +3,17 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { createCleaners } from "../cleaners/index.ts";
+import { CodexInstallationCleaner } from "../cleaners/installations/codex-cleaner.ts";
 import { AuditLogger } from "../core/audit-logger.ts";
 import { pathExists } from "../core/filesystem/index.ts";
 import type { CleanupCategoryId } from "../core/types.ts";
+import {
+    addCodexRelease,
+    codexStorePath,
+    selectCodexRelease,
+} from "../test-support/codex-fixtures.ts";
 import { createSandbox, type Sandbox } from "../test-support/fixtures.ts";
+import type { WindowsProcess } from "../windows/processes.ts";
 import { cleanersForCategories } from "./categories.ts";
 import { type CleanupSession, runUnattendedCleanup } from "./operations.ts";
 import { newSummary } from "./summary.ts";
@@ -28,9 +35,10 @@ afterAll(() => {
     for (const [name, value] of saved) if (value !== undefined) process.env[name] = value;
 });
 
-// These cleaners query live Windows state (Driver Store, running processes). Their selection
-// rules are covered by fixture tests of their own.
-const liveSystemCleaners = new Set(["nvidia-drivers", "codex-releases"]);
+// The NVIDIA cleaner queries the live Windows Driver Store; its selection rules have their own
+// parser. The Codex release cleaner gets a scripted process list instead of the live one.
+const liveSystemCleaners = new Set(["nvidia-drivers"]);
+let runningProcesses: WindowsProcess[] = [];
 
 let sandbox: Sandbox;
 const home = join("Users", "test");
@@ -38,6 +46,7 @@ const local = join(home, "AppData", "Local");
 
 beforeEach(async () => {
     sandbox = await createSandbox();
+    runningProcesses = [{ id: 1, name: "explorer.exe", path: "C:\\Windows\\explorer.exe" }];
 });
 afterEach(() => sandbox.dispose());
 
@@ -46,9 +55,13 @@ async function dryRun(category: CleanupCategoryId): Promise<{
     removedTargets: string[];
     log: string;
 }> {
-    const cleaners = cleanersForCategories(createCleaners(sandbox.paths), [category]).filter(
-        (cleaner) => !liveSystemCleaners.has(cleaner.id),
-    );
+    const cleaners = cleanersForCategories(createCleaners(sandbox.paths), [category])
+        .filter((cleaner) => !liveSystemCleaners.has(cleaner.id))
+        .map((cleaner) =>
+            cleaner.id === "codex-releases"
+                ? new CodexInstallationCleaner(sandbox.paths, async () => runningProcesses)
+                : cleaner,
+        );
     const session: CleanupSession = {
         audit: await AuditLogger.create(join(sandbox.root, "logs")),
         summary: newSummary(),
@@ -69,7 +82,7 @@ describe("dry run per cleanup category", () => {
             join(home, "AppData", "Roaming", "discord", "Cache", "data_0"),
         );
         const { session, removedTargets, log } = await dryRun("general-cache");
-        expect([...session.selectedCleaners].toSorted()).toEqual(["codex", "discord"]);
+        expect([...session.selectedCleaners].toSorted()).toEqual(["codex", "discord-cache"]);
         expect(session.summary.detectedBytes).toBe(2);
         expect(removedTargets).toEqual([]);
         expect(log).toContain('"dry-run-skip"');
@@ -105,5 +118,43 @@ describe("dry run per cleanup category", () => {
         expect(log).not.toContain("GitHub Desktop 3.3.0");
         expect(removedTargets).toEqual([]);
         expect(await pathExists(superseded)).toBe(true);
+    });
+
+    test("old-installation cleanup previews latest-only Codex cleanup per release store", async () => {
+        const inUse = await addCodexRelease(sandbox, "standalone", "0.160.0");
+        const rollback = await addCodexRelease(sandbox, "standalone", "0.165.0");
+        const selected = await addCodexRelease(sandbox, "standalone", "0.167.0");
+        await selectCodexRelease(sandbox, "standalone", "0.167.0");
+        await sandbox.file(
+            codexStorePath("standalone", "selection-history"),
+            `${selected}\n${rollback}\n`,
+        );
+        const daemonOld = await addCodexRelease(sandbox, "app-server-daemon", "0.169.1");
+        const daemonSelected = await addCodexRelease(sandbox, "app-server-daemon", "0.172.0");
+        const daemonStaged = await addCodexRelease(sandbox, "app-server-daemon", "0.173.0");
+        await selectCodexRelease(sandbox, "app-server-daemon", "0.172.0");
+        await sandbox.file(
+            codexStorePath("app-server-daemon", "auto-update-version"),
+            daemonStaged,
+        );
+        runningProcesses.push({
+            id: 2,
+            name: "codex.exe",
+            path: join(
+                sandbox.root,
+                codexStorePath("standalone", "releases", inUse, "bin", "codex.exe"),
+            ),
+        });
+
+        const { log, removedTargets } = await dryRun("old-installations");
+        const previewed = [...log.matchAll(/"candidate":"Codex ([^"]+)"/g)].map(
+            (match) => match[1] ?? "",
+        );
+        expect(previewed.toSorted((left, right) => left.localeCompare(right))).toEqual([
+            `app-server-daemon ${daemonOld}`,
+            `standalone ${rollback}`,
+        ]);
+        expect(log).not.toContain(daemonSelected + '"');
+        expect(removedTargets).toEqual([]);
     });
 });

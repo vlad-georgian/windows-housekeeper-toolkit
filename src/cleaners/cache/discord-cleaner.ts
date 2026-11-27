@@ -6,7 +6,8 @@ import { BaseCleaner } from "../base-cleaner.ts";
 import { chromiumCaches, detectNamedCaches } from "../helpers.ts";
 
 export class DiscordCacheCleaner extends BaseCleaner {
-    readonly id = "discord";
+    // Not "discord": that saved sign-in ID previously meant old-version cleanup.
+    readonly id = "discord-cache";
     readonly appId = "discord";
     readonly category = "general-cache";
     readonly label = "Discord";

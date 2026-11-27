@@ -37,6 +37,16 @@ describe("sign-in cleanup selection", () => {
         expect(cleaners.map((cleaner) => cleaner.id)).toEqual(["vscode", "codex"]);
         expect(excluded).toEqual(["opencode", "unknown-app"]);
     });
+
+    test("does not repurpose saved old-version selections as cache cleanup", () => {
+        // Before cache cleaners existed, these IDs only removed old Squirrel versions.
+        const { cleaners, excluded } = resolveSignInCleaners(catalog, [
+            "discord",
+            "github-desktop",
+        ]);
+        expect(cleaners).toEqual([]);
+        expect(excluded).toEqual(["discord", "github-desktop"]);
+    });
 });
 
 describe("unattended category selection", () => {

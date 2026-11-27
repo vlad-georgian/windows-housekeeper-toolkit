@@ -8,6 +8,7 @@ import {
 import type { SystemPaths } from "../../core/system-paths.ts";
 import type { CleanupCandidate } from "../../core/types.ts";
 import { BaseCleaner } from "../base-cleaner.ts";
+import type { Environment } from "../helpers.ts";
 
 // Bun stores each downloaded package version as `<name>@<version>@@@<n>`. The unversioned
 // `<name>` directories only index those versions and stay in place.
@@ -26,7 +27,7 @@ export class BunCacheCleaner extends BaseCleaner {
 
     constructor(
         private readonly paths: SystemPaths,
-        private readonly environment: Readonly<Record<string, string | undefined>> = process.env,
+        private readonly environment: Environment = process.env,
     ) {
         super();
     }
