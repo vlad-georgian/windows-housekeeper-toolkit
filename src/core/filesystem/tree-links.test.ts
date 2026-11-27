@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { link, mkdir, readFile, readdir, rename, rm, symlink } from 'node:fs/promises'
+import { link, lstat, mkdir, readFile, readdir, rename, rm, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { createSandbox, type Sandbox } from '../../test-support/fixtures.ts'
 import { rejection } from '../../test-support/rejection.ts'
 import type { RemovedEntry } from '../types.ts'
+import { removeTreeAnchored } from './anchored-delete.ts'
 import { createFilesystemCandidate, pathExists, removeFilesystemCandidate } from './index.ts'
 
 let sandbox: Sandbox
@@ -119,5 +120,95 @@ describe('links inside a verified tree', () => {
         expect(failure).toBeInstanceOf(Error)
         expect((await readdir(elsewhere)).toSorted()).toEqual(['three', 'two'])
         expect(await readFile(kept, 'utf8')).toBe('kept')
+    })
+
+    test('pin a directory that is being emptied, so a plain directory cannot be swapped into its place', async () => {
+        await sandbox.file(join(release, 'package.json'), '{}')
+        await sandbox.file(join(release, 'node_modules', 'one'), '1')
+        await sandbox.file(join(release, 'node_modules', 'two'), '2')
+        // A different plain directory, with an entry of the same name, prepared outside the tree.
+        const impostor = await sandbox.file(join('Users', 'test', 'impostor', 'two'), 'impostor')
+        const candidate = await createFilesystemCandidate({ ...candidateOptions(), unlinkTreeLinks: true })
+        if (!candidate) throw new Error('Expected a candidate.')
+        let swapBlocked = false
+        let swapped = false
+
+        const failure = await rejection(
+            removeFilesystemCandidate(candidate, {
+                onRemoved: async (entry) => {
+                    if (swapped || swapBlocked || !entry.path.endsWith('one')) return
+                    const modules = join(sandbox.root, release, 'node_modules')
+                    try {
+                        await rename(modules, join(sandbox.root, release, 'moved'))
+                        await rename(join(sandbox.root, 'Users', 'test', 'impostor'), modules)
+                        swapped = true
+                    } catch {
+                        swapBlocked = true
+                    }
+                }
+            })
+        )
+
+        // Windows refuses to rename a directory while the walk holds it open. If it ever did not, removal must still stop.
+        expect(swapBlocked || (swapped && failure instanceof Error)).toBe(true)
+        if (swapBlocked) expect(failure).toBeNull()
+        else expect(await readFile(join(sandbox.root, release, 'node_modules', 'two'), 'utf8')).toBe('impostor')
+        expect(swapBlocked ? true : await pathExists(impostor)).toBe(true)
+    })
+
+    test('refuse a root that is not the directory that was detected', async () => {
+        await sandbox.file(join(release, 'package.json'), '{}')
+        const root = join(sandbox.root, release)
+        const detected = await lstat(root, { bigint: true })
+        // A different plain directory now stands at the same location, as after a swap between detection and removal.
+        await rename(root, join(sandbox.root, apps, 'moved'))
+        await sandbox.file(join(release, 'keep.txt'), 'keep')
+
+        const failure = await rejection(removeTreeAnchored(root, root, { dev: detected.dev, ino: detected.ino }, { onRemoved: async () => {} }))
+
+        expect(failure).toBeInstanceOf(Error)
+        expect(await readFile(join(root, 'keep.txt'), 'utf8')).toBe('keep')
+    })
+
+    test('release every handle after a failed walk, so the tree can be removed afterwards', async () => {
+        await sandbox.file(join(release, 'package.json'), '{}')
+        await sandbox.file(join(release, 'sub', 'file.txt'), 'x')
+        const candidate = await createFilesystemCandidate({ ...candidateOptions(), unlinkTreeLinks: true })
+        if (!candidate) throw new Error('Expected a candidate.')
+
+        const failure = await rejection(
+            removeFilesystemCandidate(candidate, {
+                onRemoved: async () => {
+                    throw new Error('stop')
+                }
+            })
+        )
+        expect(failure).toBeInstanceOf(Error)
+
+        await rm(join(sandbox.root, release), { recursive: true })
+        expect(await pathExists(join(sandbox.root, release))).toBe(false)
+    })
+
+    test('keep a checked directory from being renamed out of the tree while its contents are removed', async () => {
+        await sandbox.file(join(release, 'package.json'), '{}')
+        await sandbox.file(join(release, 'sub', 'a'), 'a')
+        await sandbox.file(join(release, 'sub', 'b'), 'b')
+        const outside = join(sandbox.root, 'Users', 'test', 'outside')
+        await mkdir(outside, { recursive: true })
+        const candidate = await createFilesystemCandidate({ ...candidateOptions(), unlinkTreeLinks: true })
+        if (!candidate) throw new Error('Expected a candidate.')
+        let renameBlocked = false
+
+        await removeFilesystemCandidate(candidate, {
+            onRemoved: async (entry) => {
+                if (!entry.path.endsWith('a')) return
+                // The directory being emptied is checked and open, so it cannot be moved out and finished elsewhere.
+                renameBlocked = (await rejection(rename(join(sandbox.root, release, 'sub'), join(outside, 'sub')))) instanceof Error
+            }
+        })
+
+        expect(renameBlocked).toBe(true)
+        expect(await readdir(outside)).toEqual([])
+        expect(await pathExists(join(sandbox.root, release))).toBe(false)
     })
 })

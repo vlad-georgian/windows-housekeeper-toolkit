@@ -96,7 +96,7 @@ export async function removeFilesystemCandidate(candidate: CleanupCandidate, cal
 
     if (candidate.unlinkTreeLinks) {
         // Path-based deletion cannot keep a parent swap from redirecting an unlink, so only handle-anchored removal is allowed.
-        const anchored = await removeTreeAnchored(current.path, current.path, callbacks)
+        const anchored = await removeTreeAnchored(current.path, current.path, { dev: current.stats.dev, ino: current.stats.ino }, callbacks)
         return { removedEntries: anchored.entries, reclaimedBytes: anchored.bytes }
     }
     const result = await removePathRecursively(current.path, current.stats, callbacks)
