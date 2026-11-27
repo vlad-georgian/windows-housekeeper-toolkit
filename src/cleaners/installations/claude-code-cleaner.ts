@@ -6,9 +6,9 @@ import { canonicalPathKey, createFilesystemCandidate, listDirectoryNames } from 
 import type { SystemPaths } from '../../core/system-paths.ts'
 import type { CleanupCandidate, CommandRunner, RemovalCallbacks, RemovalResult } from '../../core/types.ts'
 import { compareVersions } from '../../core/versions.ts'
-import { listWindowsProcesses } from '../../windows/processes.ts'
+import { listWindowsProcesses, type ProcessLister } from '../../windows/processes.ts'
 import { BaseCleaner } from '../base-cleaner.ts'
-import { isPathInUse, type ProcessLister, runningProcessPaths } from './running-paths.ts'
+import { isPathInUse, runningProcessPaths } from './running-paths.ts'
 
 const versionName = /^\d+(?:\.\d+){1,3}(?:[-+].*)?$/
 const claudeProcess = /^claude(?:\.exe)?$/i

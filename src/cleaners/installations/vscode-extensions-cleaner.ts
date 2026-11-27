@@ -1,6 +1,8 @@
+import { readdir } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 
-import { createFilesystemCandidate, listDirectoryNames, pathExists, readSmallTextFile } from '../../core/filesystem/index.ts'
+import { createFilesystemCandidate, pathExists, readSmallTextFile } from '../../core/filesystem/index.ts'
+import { hasErrorCode } from '../../core/filesystem/paths.ts'
 import type { SystemPaths } from '../../core/system-paths.ts'
 import type { CleanupCandidate, RemovalCallbacks, RemovalResult } from '../../core/types.ts'
 import { BaseCleaner } from '../base-cleaner.ts'
@@ -66,10 +68,20 @@ export class VSCodeExtensionsCleaner extends BaseCleaner {
         const root = this.root()
         const registries = [installedFolders(await readSmallTextFile(join(root, 'extensions.json'), root, metadataLimit))]
         const profiles = join(this.paths.roamingAppData, 'Code', 'User', 'profiles')
-        for (const profile of await listDirectoryNames(profiles)) {
+        // Only a confirmed absence means there are no other profiles. A directory that cannot be listed could hide one.
+        let names: string[]
+        try {
+            names = await readdir(profiles)
+        } catch (error) {
+            if (!hasErrorCode(error, 'ENOENT', 'ENOTDIR')) return null
+            names = []
+        }
+        for (const profile of names) {
             const directory = join(profiles, profile)
             // A profile without a registry has no installed extensions of its own.
-            if (!(await pathExists(join(directory, 'extensions.json')))) continue
+            const present = await pathExists(join(directory, 'extensions.json')).catch(() => null)
+            if (present === null) return null
+            if (!present) continue
             registries.push(installedFolders(await readSmallTextFile(join(directory, 'extensions.json'), directory, metadataLimit)))
         }
         // A profile whose registry is unreadable could still use an extension, so it blocks the cleaner.

@@ -132,4 +132,19 @@ describe('obsolete VS Code extensions', () => {
 
         expect(await names()).toEqual([])
     })
+
+    test('offers nothing when an existing profiles directory cannot be listed', async () => {
+        await addExtension('a.old-1.0.0')
+        await registry()
+        await obsolete({ 'a.old-1.0.0': true })
+        const directory = join(sandbox.root, profiles)
+        await sandbox.file(join(profiles, 'work', 'extensions.json'), JSON.stringify([{ relativeLocation: 'a.old-1.0.0' }]))
+        // Deny listing of this one directory only, as a permissions fault would.
+        Bun.spawnSync(['icacls', directory, '/deny', '*S-1-1-0:(RD)'])
+        try {
+            expect(await names()).toEqual([])
+        } finally {
+            Bun.spawnSync(['icacls', directory, '/remove:d', '*S-1-1-0'])
+        }
+    })
 })

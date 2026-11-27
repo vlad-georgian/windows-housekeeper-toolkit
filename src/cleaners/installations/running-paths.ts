@@ -41,3 +41,29 @@ export async function runningProcessPaths(listProcesses: ProcessLister, unreadab
 export function isPathInUse(path: string, processPaths: readonly string[]): boolean {
     return processPaths.some((processPath) => canonicalPathKey(processPath) === canonicalPathKey(path) || isPathInside(processPath, path))
 }
+
+/**
+ * Command lines of the running script runtimes matching `runtimeNames`, such as the external Node
+ * that Vite+ starts with a release script as its argument. Returns `null` when the inventory is
+ * unavailable or a runtime's command line is withheld, because then it cannot be told apart from
+ * one that uses the installation.
+ */
+export async function runtimeCommandLines(listProcesses: ProcessLister, runtimeNames: RegExp): Promise<string[] | null> {
+    try {
+        const lines: string[] = []
+        for (const entry of await listProcesses()) {
+            if (entry.id === process.pid || !runtimeNames.test(entry.name)) continue
+            if (!entry.commandLine) return null
+            lines.push(entry.commandLine)
+        }
+        return lines
+    } catch {
+        return null
+    }
+}
+
+/** Whether any command line names the path, in either slash style. */
+export function isPathReferenced(path: string, commandLines: readonly string[]): boolean {
+    const forms = [path.toLowerCase(), path.replaceAll('\\', '/').toLowerCase()]
+    return commandLines.some((line) => forms.some((form) => line.toLowerCase().includes(form)))
+}
