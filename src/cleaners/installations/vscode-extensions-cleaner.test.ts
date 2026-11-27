@@ -1,13 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { lstat } from 'node:fs/promises'
+import { stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import { pathExists } from '../../core/filesystem/index.ts'
 import { createSandbox, type Sandbox } from '../../test-support/fixtures.ts'
 import { rejection } from '../../test-support/rejection.ts'
 import { VSCodeExtensionsCleaner } from './vscode-extensions-cleaner.ts'
 
 let sandbox: Sandbox
 const extensions = join('Users', 'test', '.vscode', 'extensions')
+const profiles = join('Users', 'test', 'AppData', 'Roaming', 'Code', 'User', 'profiles')
 const noop = { onRemoved: async (): Promise<void> => {} }
 
 beforeEach(async () => {
@@ -36,11 +38,6 @@ async function obsolete(value: unknown): Promise<void> {
     await sandbox.file(join(extensions, '.obsolete'), JSON.stringify(value))
 }
 
-const exists = (path: string): Promise<boolean> =>
-    lstat(path).then(
-        () => true,
-        () => false
-    )
 const cleaner = (): VSCodeExtensionsCleaner => new VSCodeExtensionsCleaner(sandbox.paths)
 const names = async (): Promise<string[]> => (await cleaner().detect()).map((candidate) => candidate.displayName).toSorted()
 
@@ -90,17 +87,49 @@ describe('obsolete VS Code extensions', () => {
         // VS Code reinstalled the extension after detection.
         await registry('a.ext-1.0.0', 'a.ext-2.0.0')
         expect(await rejection(instance.remove(candidate, noop))).toBeInstanceOf(Error)
-        expect(await exists(join(sandbox.root, extensions, 'a.ext-1.0.0'))).toBe(true)
+        expect(await pathExists(join(sandbox.root, extensions, 'a.ext-1.0.0'))).toBe(true)
 
         // VS Code dropped the obsolete marker after detection.
         await registry('a.ext-2.0.0')
         await obsolete({})
         expect(await rejection(instance.remove(candidate, noop))).toBeInstanceOf(Error)
-        expect(await exists(join(sandbox.root, extensions, 'a.ext-1.0.0'))).toBe(true)
+        expect(await pathExists(join(sandbox.root, extensions, 'a.ext-1.0.0'))).toBe(true)
 
         await obsolete({ 'a.ext-1.0.0': true })
         await instance.remove(candidate, noop)
-        expect(await exists(join(sandbox.root, extensions, 'a.ext-1.0.0'))).toBe(false)
-        expect(await exists(join(sandbox.root, extensions, 'a.ext-2.0.0'))).toBe(true)
+        expect(await pathExists(join(sandbox.root, extensions, 'a.ext-1.0.0'))).toBe(false)
+        expect(await pathExists(join(sandbox.root, extensions, 'a.ext-2.0.0'))).toBe(true)
+    })
+
+    test('reads a registry larger than the default small-file limit', async () => {
+        await addExtension('a.old-1.0.0')
+        await addExtension('a.old-2.0.0')
+        const installed = Array.from({ length: 1200 }, (_, index) => `publisher.extension-${index}-1.0.0`)
+        await registry('a.old-2.0.0', ...installed)
+        await obsolete({ 'a.old-1.0.0': true, 'a.old-2.0.0': true })
+        expect((await stat(join(sandbox.root, extensions, 'extensions.json'))).size).toBeGreaterThan(131_072)
+
+        expect(await names()).toEqual(['VS Code extension a.old-1.0.0'])
+    })
+
+    test('preserves extensions that any VS Code profile still lists as installed', async () => {
+        await addExtension('a.old-1.0.0')
+        await addExtension('b.shared-1.0.0')
+        await registry()
+        await obsolete({ 'a.old-1.0.0': true, 'b.shared-1.0.0': true })
+        await sandbox.file(join(profiles, 'work', 'extensions.json'), JSON.stringify([{ relativeLocation: 'b.shared-1.0.0' }]))
+        await sandbox.file(join(profiles, 'play', 'extensions.json'), '[]')
+        await sandbox.file(join(profiles, 'empty', 'settings.json'), '{}')
+
+        expect(await names()).toEqual(['VS Code extension a.old-1.0.0'])
+    })
+
+    test('offers nothing when a profile registry cannot be read', async () => {
+        await addExtension('a.old-1.0.0')
+        await registry()
+        await obsolete({ 'a.old-1.0.0': true })
+        await sandbox.file(join(profiles, 'work', 'extensions.json'), 'not json')
+
+        expect(await names()).toEqual([])
     })
 })

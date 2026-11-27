@@ -1,9 +1,12 @@
 import { basename, join } from 'node:path'
 
-import { createFilesystemCandidate, readSmallTextFile } from '../../core/filesystem/index.ts'
+import { createFilesystemCandidate, listDirectoryNames, pathExists, readSmallTextFile } from '../../core/filesystem/index.ts'
 import type { SystemPaths } from '../../core/system-paths.ts'
 import type { CleanupCandidate, RemovalCallbacks, RemovalResult } from '../../core/types.ts'
 import { BaseCleaner } from '../base-cleaner.ts'
+
+// extensions.json grows by roughly 650 bytes per installed extension.
+const metadataLimit = 4n * 1024n * 1024n
 
 function parseJson(content: string | null): unknown {
     if (content === null) return null
@@ -58,11 +61,29 @@ export class VSCodeExtensionsCleaner extends BaseCleaner {
         return join(this.paths.home, '.vscode', 'extensions')
     }
 
+    /** Every installed-extension registry: the default profile's and one per additional VS Code profile. */
+    private async installed(): Promise<Set<string> | null> {
+        const root = this.root()
+        const registries = [installedFolders(await readSmallTextFile(join(root, 'extensions.json'), root, metadataLimit))]
+        const profiles = join(this.paths.roamingAppData, 'Code', 'User', 'profiles')
+        for (const profile of await listDirectoryNames(profiles)) {
+            const directory = join(profiles, profile)
+            // A profile without a registry has no installed extensions of its own.
+            if (!(await pathExists(join(directory, 'extensions.json')))) continue
+            registries.push(installedFolders(await readSmallTextFile(join(directory, 'extensions.json'), directory, metadataLimit)))
+        }
+        // A profile whose registry is unreadable could still use an extension, so it blocks the cleaner.
+        if (registries.some((registry) => registry === null)) return null
+        const installed = new Set<string>()
+        for (const registry of registries) for (const folder of registry ?? []) installed.add(folder)
+        return installed
+    }
+
     /** Obsolete folders that the installed-extension registry does not reference, or null when either file is unverified. */
     private async removableFolders(): Promise<Set<string> | null> {
         const root = this.root()
-        const obsolete = obsoleteFolders(await readSmallTextFile(join(root, '.obsolete'), root))
-        const installed = installedFolders(await readSmallTextFile(join(root, 'extensions.json'), root))
+        const obsolete = obsoleteFolders(await readSmallTextFile(join(root, '.obsolete'), root, metadataLimit))
+        const installed = await this.installed()
         if (!obsolete || !installed) return null
         return new Set([...obsolete].filter((folder) => !installed.has(folder.toLowerCase())))
     }
