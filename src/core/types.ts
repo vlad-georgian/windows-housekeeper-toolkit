@@ -29,8 +29,15 @@ export interface RemovedEntry {
     readonly modifiedAt: Date | null
 }
 
+export interface SkippedEntry {
+    readonly path: string
+    readonly reason: string
+}
+
 export interface RemovalCallbacks {
     readonly onRemoved: (entry: RemovedEntry) => Promise<void>
+    /** Reports an entry left in place, such as a locked file, while removal continues. */
+    readonly onSkipped?: (entry: SkippedEntry) => Promise<void>
 }
 
 export interface RemovalResult {
