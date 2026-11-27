@@ -45,3 +45,14 @@ A failure before the swap is verified is undone and the recovery record is
 removed. A failure afterwards keeps the record, which names the original,
 destination, staging, and set-aside paths. The operation holds back an app
 with a recovery record and points to the journal.
+
+## Tests
+
+Tests use disposable sandbox profiles and never touch the real profile. The
+cross-volume test runs only when `HOUSEKEEPER_TEST_OTHER_VOLUME` names a
+writable directory on a different local volume from the system temporary
+directory. It creates and removes its own directory there.
+
+```powershell
+$env:HOUSEKEEPER_TEST_OTHER_VOLUME = 'E:\scratch'; bun test src/relocation
+```
