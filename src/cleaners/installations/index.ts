@@ -12,6 +12,7 @@ import { NotionCleaner } from './notion-cleaner.ts'
 import { NvidiaDriverCleaner } from './nvidia-driver-cleaner.ts'
 import { ObsidianCleaner } from './obsidian-cleaner.ts'
 import { OpenCodeCleaner } from './opencode-cleaner.ts'
+import { ScoopInstallationCleaner } from './scoop-cleaner.ts'
 import { SignalRgbCleaner } from './signal-rgb-cleaner.ts'
 import { SlackCleaner } from './slack-cleaner.ts'
 import { T3CodeCleaner } from './t3-code-cleaner.ts'
@@ -34,6 +35,7 @@ export function createInstallationCleaners(paths: SystemPaths): AppCleaner[] {
         new ChatboxCleaner(paths),
         new VortexCleaner(paths),
         new LinuaCleaner(paths),
+        new ScoopInstallationCleaner(paths),
         new NvidiaDriverCleaner(paths),
         new AmdInstallerCleaner(paths)
     ]
