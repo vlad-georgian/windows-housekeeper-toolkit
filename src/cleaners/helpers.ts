@@ -1,50 +1,43 @@
-import { lstat, realpath } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { lstat, realpath } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join, relative } from 'node:path'
 
-import {
-    canonicalPathKey,
-    createFilesystemCandidate,
-    isPathInside,
-    isUnavailablePath,
-    listDirectoryNames,
-    readSmallTextFile,
-} from "../core/filesystem/index.ts";
-import type { SystemPaths } from "../core/system-paths.ts";
-import type { CleanupCandidate } from "../core/types.ts";
-import { compareVersions } from "../core/versions.ts";
-import { listWindowsProcesses } from "../windows/processes.ts";
+import { canonicalPathKey, createFilesystemCandidate, isPathInside, isUnavailablePath, listDirectoryNames, readSmallTextFile } from '../core/filesystem/index.ts'
+import type { SystemPaths } from '../core/system-paths.ts'
+import type { CleanupCandidate } from '../core/types.ts'
+import { compareVersions } from '../core/versions.ts'
+import { listWindowsProcesses } from '../windows/processes.ts'
 
 export async function detectUpdaterDirectory(options: {
-    readonly appId: string;
-    readonly updaterRoot: string;
-    readonly allowedRoot: string;
-    readonly label: string;
+    readonly appId: string
+    readonly updaterRoot: string
+    readonly allowedRoot: string
+    readonly label: string
 }): Promise<CleanupCandidate[]> {
     // The updater's `pending` subdirectory holds a staged update awaiting installation, so only
     // payloads in the cache root, which belong to installed updates, qualify.
-    const candidates: CleanupCandidate[] = [];
+    const candidates: CleanupCandidate[] = []
     for (const name of await listDirectoryNames(options.updaterRoot)) {
-        if (!/\.(?:exe|msi|exe\.blockmap|msi\.blockmap)$/i.test(name)) continue;
+        if (!/\.(?:exe|msi|exe\.blockmap|msi\.blockmap)$/i.test(name)) continue
         const candidate = await createFilesystemCandidate({
             id: `${options.appId}:updater:cache:${name}`,
             path: join(options.updaterRoot, name),
             allowedRoot: options.allowedRoot,
             displayName: `${options.label} downloaded ${name}`,
-            reason: "Redownloadable installer payload for an installed update",
-            type: "file",
-        });
-        if (candidate) candidates.push(candidate);
+            reason: 'Redownloadable installer payload for an installed update',
+            type: 'file'
+        })
+        if (candidate) candidates.push(candidate)
     }
-    return candidates;
+    return candidates
 }
 
 export async function detectNamedCaches(
     appId: string,
     label: string,
     profile: string,
-    cacheDirectories: readonly (readonly [path: string, reason: string])[],
+    cacheDirectories: readonly (readonly [path: string, reason: string])[]
 ): Promise<CleanupCandidate[]> {
-    const candidates: CleanupCandidate[] = [];
+    const candidates: CleanupCandidate[] = []
     for (const [name, reason] of cacheDirectories) {
         const candidate = await createFilesystemCandidate({
             id: `${appId}:cache:${name}`,
@@ -52,130 +45,112 @@ export async function detectNamedCaches(
             allowedRoot: profile,
             displayName: `${label} ${name}`,
             reason,
-            type: "directory",
-        });
-        if (candidate && (candidate.fileCount ?? 0) > 0) candidates.push(candidate);
+            type: 'directory'
+        })
+        if (candidate && (candidate.fileCount ?? 0) > 0) candidates.push(candidate)
     }
-    return candidates;
+    return candidates
 }
 
 interface SquirrelInstallationOptions {
-    readonly appId: string;
-    readonly appRoot: string;
-    readonly allowedRoot: string;
-    readonly label: string;
+    readonly appId: string
+    readonly appRoot: string
+    readonly allowedRoot: string
+    readonly label: string
 }
 
-async function inspectSquirrelInstallation(
-    appRoot: string,
-    allowedRoot: string,
-): Promise<{ current: string; removableVersions: string[] } | null> {
-    if (!isPathInside(appRoot, allowedRoot)) return null;
+async function inspectSquirrelInstallation(appRoot: string, allowedRoot: string): Promise<{ current: string; removableVersions: string[] } | null> {
+    if (!isPathInside(appRoot, allowedRoot)) return null
     try {
-        const canonicalParent = await realpath(allowedRoot);
-        const updater = join(canonicalParent, relative(allowedRoot, appRoot), "Update.exe");
-        if (
-            !(await lstat(updater)).isFile() ||
-            canonicalPathKey(await realpath(updater)) !== canonicalPathKey(updater)
-        ) {
-            return null;
+        const canonicalParent = await realpath(allowedRoot)
+        const updater = join(canonicalParent, relative(allowedRoot, appRoot), 'Update.exe')
+        if (!(await lstat(updater)).isFile() || canonicalPathKey(await realpath(updater)) !== canonicalPathKey(updater)) {
+            return null
         }
     } catch (error) {
-        if (isUnavailablePath(error)) return null;
-        throw error;
+        if (isUnavailablePath(error)) return null
+        throw error
     }
 
-    const releaseIndex = await readSmallTextFile(
-        join(appRoot, "packages", "RELEASES"),
-        allowedRoot,
-    );
-    if (!releaseIndex) return null;
+    const releaseIndex = await readSmallTextFile(join(appRoot, 'packages', 'RELEASES'), allowedRoot)
+    if (!releaseIndex) return null
     const current = releaseIndex
         .split(/\r?\n/)
         .flatMap((line) => {
-            const match =
-                /^[\da-f]{40}\s+[^\\/\s]+?[-.](\d+(?:\.\d+){2,3})-full\.nupkg\s+\d+\s*$/i.exec(
-                    line,
-                );
-            return match?.[1] ? [match[1]] : [];
+            const match = /^[\da-f]{40}\s+[^\\/\s]+?[-.](\d+(?:\.\d+){2,3})-full\.nupkg\s+\d+\s*$/i.exec(line)
+            return match?.[1] ? [match[1]] : []
         })
-        .toSorted((left, right) => compareVersions(right, left))[0];
-    if (!current) return null;
+        .toSorted((left, right) => compareVersions(right, left))[0]
+    if (!current) return null
 
     const versions = (await listDirectoryNames(appRoot))
         .filter((name) => /^app-\d+(?:\.\d+){2,3}$/i.test(name))
-        .toSorted((left, right) =>
-            compareVersions(right.replace(/^app-/i, ""), left.replace(/^app-/i, "")),
-        );
-    if (versions[0]?.toLowerCase() !== `app-${current}`) return null;
+        .toSorted((left, right) => compareVersions(right.replace(/^app-/i, ''), left.replace(/^app-/i, '')))
+    if (versions[0]?.toLowerCase() !== `app-${current}`) return null
     // Squirrel's own cleanup retains the current and immediately previous versions.
-    return { current, removableVersions: versions.slice(2) };
+    return { current, removableVersions: versions.slice(2) }
 }
 
-export async function detectSquirrelInstallation(
-    options: SquirrelInstallationOptions,
-): Promise<CleanupCandidate[]> {
-    const installation = await inspectSquirrelInstallation(options.appRoot, options.allowedRoot);
-    if (!installation) return [];
+export async function detectSquirrelInstallation(options: SquirrelInstallationOptions): Promise<CleanupCandidate[]> {
+    const installation = await inspectSquirrelInstallation(options.appRoot, options.allowedRoot)
+    if (!installation) return []
 
-    const candidates: CleanupCandidate[] = [];
+    const candidates: CleanupCandidate[] = []
     for (const oldVersion of installation.removableVersions) {
         const candidate = await createFilesystemCandidate({
             id: `${options.appId}:old-version:${oldVersion}`,
             path: join(options.appRoot, oldVersion),
             allowedRoot: options.appRoot,
-            displayName: `${options.label} ${oldVersion.replace(/^app-/i, "")}`,
+            displayName: `${options.label} ${oldVersion.replace(/^app-/i, '')}`,
             reason: `Older Squirrel release. The current ${installation.current} and previous releases are retained.`,
-            type: "directory",
-        });
-        if (candidate) candidates.push(candidate);
+            type: 'directory'
+        })
+        if (candidate) candidates.push(candidate)
     }
 
-    return candidates;
+    return candidates
 }
 
-export async function verifySquirrelVersionBeforeRemoval(
-    candidate: CleanupCandidate,
-): Promise<void> {
+export async function verifySquirrelVersionBeforeRemoval(candidate: CleanupCandidate): Promise<void> {
     if (!candidate.path || !candidate.allowedRoot || !candidate.canonicalPath) {
-        throw new Error(`Missing verified path for ${candidate.displayName}.`);
+        throw new Error(`Missing verified path for ${candidate.displayName}.`)
     }
-    const appRoot = candidate.allowedRoot;
-    const installation = await inspectSquirrelInstallation(appRoot, dirname(appRoot));
+    const appRoot = candidate.allowedRoot
+    const installation = await inspectSquirrelInstallation(appRoot, dirname(appRoot))
     if (!installation?.removableVersions.includes(basename(candidate.path))) {
-        throw new Error(`The Squirrel installation changed after detection at ${appRoot}.`);
+        throw new Error(`The Squirrel installation changed after detection at ${appRoot}.`)
     }
     for (const entry of await listWindowsProcesses()) {
-        if (!entry.path) continue;
+        if (!entry.path) continue
         if (isPathInside(entry.path, candidate.canonicalPath)) {
-            throw new Error(`${candidate.displayName} is in use.`);
+            throw new Error(`${candidate.displayName} is in use.`)
         }
     }
 }
 
 export function localPath(paths: SystemPaths, ...parts: string[]): string {
-    return join(paths.localAppData, ...parts);
+    return join(paths.localAppData, ...parts)
 }
 
 export function codexHome(paths: SystemPaths): string {
-    const override = process.env.CODEX_HOME;
-    return override && isAbsolute(override) ? override : join(paths.home, ".codex");
+    const override = process.env.CODEX_HOME
+    return override && isAbsolute(override) ? override : join(paths.home, '.codex')
 }
 
 /** Regenerable Chromium caches shared by Electron app profiles. */
 export const chromiumCaches: readonly (readonly [path: string, reason: string])[] = [
-    ["Cache", "Regenerable Chromium HTTP cache"],
-    ["Code Cache", "Regenerable Chromium compiled code cache"],
-    ["GPUCache", "Regenerable Chromium GPU cache"],
-    ["DawnCache", "Regenerable Chromium graphics cache"],
-    ["DawnGraphiteCache", "Regenerable Chromium graphics cache"],
-    ["DawnWebGPUCache", "Regenerable Chromium WebGPU cache"],
-];
+    ['Cache', 'Regenerable Chromium HTTP cache'],
+    ['Code Cache', 'Regenerable Chromium compiled code cache'],
+    ['GPUCache', 'Regenerable Chromium GPU cache'],
+    ['DawnCache', 'Regenerable Chromium graphics cache'],
+    ['DawnGraphiteCache', 'Regenerable Chromium graphics cache'],
+    ['DawnWebGPUCache', 'Regenerable Chromium WebGPU cache']
+]
 
-export type Environment = Readonly<Record<string, string | undefined>>;
+export type Environment = Readonly<Record<string, string | undefined>>
 
 /** The per-user Scoop root: `SCOOP` when absolute, otherwise `~\scoop`. */
 export function scoopRoot(paths: SystemPaths, environment: Environment = process.env): string {
-    const override = environment.SCOOP;
-    return override && isAbsolute(override) ? override : join(paths.home, "scoop");
+    const override = environment.SCOOP
+    return override && isAbsolute(override) ? override : join(paths.home, 'scoop')
 }

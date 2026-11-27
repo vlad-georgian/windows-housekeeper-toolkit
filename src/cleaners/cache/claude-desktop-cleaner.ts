@@ -1,17 +1,19 @@
 import { realpath } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 
-import { canonicalPathKey, isUnavailablePath } from '../core/filesystem/index.ts'
-import type { SystemPaths } from '../core/system-paths.ts'
-import type { CleanupCandidate } from '../core/types.ts'
-import { BaseCleaner } from './base-cleaner.ts'
-import { detectNamedCaches } from './helpers.ts'
+import { canonicalPathKey, isUnavailablePath } from '../../core/filesystem/index.ts'
+import type { SystemPaths } from '../../core/system-paths.ts'
+import type { CleanupCandidate } from '../../core/types.ts'
+import { BaseCleaner } from '../base-cleaner.ts'
+import { detectNamedCaches } from '../helpers.ts'
 
 const packageFamily = 'Claude_pzs8sxrjxfjjc'
 const profileLocation = join('LocalCache', 'Roaming', 'Claude')
 
-export class ClaudeDesktopCleaner extends BaseCleaner {
+export class ClaudeDesktopCacheCleaner extends BaseCleaner {
     readonly id = 'claude-desktop'
+    readonly appId = 'claude-desktop'
+    readonly category = 'general-cache'
     readonly label = 'Claude Desktop'
     readonly description = 'Chromium caches in the Claude Desktop Windows package profile'
 
