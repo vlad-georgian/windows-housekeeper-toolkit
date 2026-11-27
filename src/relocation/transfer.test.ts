@@ -104,6 +104,39 @@ describe('moving a directory', () => {
         ])
     })
 
+    test('keeps the verified copy in staging until the swapping phase is recorded', async () => {
+        const seen: unknown[] = []
+        await moveDirectory(
+            { appId: 'github-desktop', original, destination, base },
+            {
+                journal,
+                beforePhase: async (phase) => {
+                    if (phase !== 'swapping') return
+                    const [record] = await journal.list()
+                    seen.push({ staging: await pathExists(record?.staging ?? ''), destination: await pathExists(destination), createdParent: record?.createdParent })
+                }
+            }
+        )
+        expect(seen).toEqual([{ staging: true, destination: false, createdParent: join(sandbox.root, 'E') }])
+    })
+
+    test('an undone move removes only the empty folders it created under the base', async () => {
+        await sandbox.directory('E/Software/test/AppData')
+        const attempt = moveDirectory(
+            { appId: 'github-desktop', original, destination, base },
+            {
+                journal,
+                beforePhase: (phase) => {
+                    if (phase === 'swapping') throw new Error('simulated interruption')
+                }
+            }
+        )
+        expect(await rejectionMessage(attempt)).toContain('simulated interruption')
+
+        expect(await pathExists(join(base, 'test', 'AppData', 'Local'))).toBe(false)
+        expect(await pathExists(join(base, 'test', 'AppData'))).toBe(true)
+    })
+
     test('undoes a move interrupted before the junction is verified', async () => {
         const failure = new Error('simulated interruption')
         const attempt = moveDirectory(

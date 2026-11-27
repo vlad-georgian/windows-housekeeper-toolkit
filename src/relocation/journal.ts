@@ -5,9 +5,10 @@ import type { SystemPaths } from '../core/system-paths.ts'
 
 export const transferPhases = ['copying', 'swapping', 'reclaiming', 'releasing'] as const
 /**
- * `copying` writes a verified copy beside its final location. `swapping` replaces the original
- * path (move) or the junction (restore). `reclaiming` removes the old source after a move, and
- * `releasing` removes the destination after a restore.
+ * `copying` writes and verifies a copy in the staging directory; nothing else has changed yet.
+ * `swapping` renames the copy into place and replaces the original path with a junction (move)
+ * or the junction with the copy (restore). `reclaiming` removes the set-aside original after a
+ * move, and `releasing` removes the destination after a restore.
  */
 export type TransferPhase = (typeof transferPhases)[number]
 
@@ -24,6 +25,8 @@ export interface RecoveryRecord {
     readonly staging: string
     /** Where a move sets the original directory aside before linking. */
     readonly aside: string | null
+    /** The highest destination parent a move created, so undoing it removes only its own folders. */
+    readonly createdParent: string | null
     readonly phase: TransferPhase
     readonly startedAt: string
 }
@@ -50,6 +53,7 @@ function isRecord(value: unknown): value is RecoveryRecord {
         typeof record.destination === 'string' &&
         typeof record.staging === 'string' &&
         (record.aside === null || typeof record.aside === 'string') &&
+        (record.createdParent === null || typeof record.createdParent === 'string') &&
         transferPhases.some((phase) => phase === record.phase) &&
         typeof record.startedAt === 'string'
     )

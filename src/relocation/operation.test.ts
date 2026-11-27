@@ -228,6 +228,7 @@ describe('restoring moved apps', () => {
             destination: mirrored(desktopInstall()),
             staging: `${mirrored(desktopInstall())}.partial`,
             aside: `${desktopInstall()}.moved`,
+            createdParent: null,
             phase: 'swapping',
             startedAt: new Date(0).toISOString()
         })

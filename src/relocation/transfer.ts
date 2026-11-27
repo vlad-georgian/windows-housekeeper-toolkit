@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Stats } from 'node:fs'
 import { lstat, mkdir, readdir, realpath, rename, rmdir, statfs, symlink, unlink } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { dirname, resolve } from 'node:path'
 
 import { canonicalPathKey, isPathInside } from '../core/filesystem/index.ts'
 import { hasErrorCode } from '../core/filesystem/paths.ts'
@@ -86,8 +86,14 @@ async function verifyJunction(original: string, destination: string): Promise<vo
     }
 }
 
-async function pruneEmptyParents(start: string, base: string): Promise<void> {
-    for (let current = start; isPathInside(current, base); current = dirname(current)) {
+/**
+ * Removes empty directories from `start` upwards, below `base`. With `createdTop`, stops after
+ * that directory so folders that existed before the transfer are kept.
+ */
+async function pruneEmptyParents(start: string, base: string, createdTop?: string | null): Promise<void> {
+    if (createdTop === null) return
+    const withinCreated = (path: string): boolean => createdTop === undefined || canonicalPathKey(path) === canonicalPathKey(createdTop) || isPathInside(path, createdTop)
+    for (let current = start; isPathInside(current, base) && withinCreated(current); current = dirname(current)) {
         try {
             await rmdir(current)
         } catch (error) {
@@ -109,13 +115,17 @@ function newRecord(action: RecoveryRecord['action'], transfer: DirectoryTransfer
         destination: transfer.destination,
         staging: action === 'move' ? `${transfer.destination}${tag}.partial` : `${transfer.original}${tag}.restoring`,
         aside: action === 'move' ? `${transfer.original}${tag}.moved` : null,
+        createdParent: null,
         phase: 'copying',
         startedAt: new Date().toISOString()
     }
 }
 
 /** Saves each phase before running it, so an interrupted transfer leaves recovery information. */
-function phaseTracker(record: RecoveryRecord, { journal, beforePhase }: TransferOptions): { record(): RecoveryRecord; enter(phase: TransferPhase): Promise<void> } {
+function phaseTracker(
+    record: RecoveryRecord,
+    { journal, beforePhase }: TransferOptions
+): { record(): RecoveryRecord; enter(phase: TransferPhase): Promise<void>; update(changes: Partial<RecoveryRecord>): Promise<void> } {
     let current = record
     return {
         record: () => current,
@@ -123,6 +133,10 @@ function phaseTracker(record: RecoveryRecord, { journal, beforePhase }: Transfer
             current = { ...current, phase }
             await journal.save(current)
             await beforePhase?.(phase)
+        },
+        async update(changes) {
+            current = { ...current, ...changes }
+            await journal.save(current)
         }
     }
 }
@@ -143,7 +157,7 @@ async function undoMove(record: RecoveryRecord, transfer: DirectoryTransfer, man
     if (!restored?.isDirectory() || restored.isSymbolicLink()) throw new Error(`${original} could not be put back.`)
     if (await lstatIfPresent(staging)) await removeVerifiedTree(staging)
     if (await lstatIfPresent(destination)) await removeTree(destination, manifest)
-    await pruneEmptyParents(dirname(destination), transfer.base)
+    await pruneEmptyParents(dirname(destination), transfer.base, record.createdParent)
 }
 
 /**
@@ -166,12 +180,14 @@ export async function moveDirectory(transfer: DirectoryTransfer, options: Transf
 
     try {
         await tracker.enter('copying')
-        await mkdir(dirname(destination), { recursive: true })
+        const createdParent = await mkdir(dirname(destination), { recursive: true })
+        // Bun reports the created directory with a `\\?\` long-path prefix.
+        if (createdParent !== undefined) await tracker.update({ createdParent: resolve(createdParent.replace(/^\\\\\?\\/u, '')) })
         await copyTree(original, staging)
         await verifyTree(staging, manifest)
-        await rename(staging, destination)
 
         await tracker.enter('swapping')
+        await rename(staging, destination)
         await rename(original, aside)
         // Detect writes that happened while copying.
         await verifyTreeContents(aside, manifest)
@@ -214,7 +230,8 @@ async function undoRestore(record: RecoveryRecord): Promise<void> {
 
 /**
  * Restores the latest contents of a relocated directory to its original path, replacing the
- * junction. The restored copy is verified before destination space is released.
+ * junction. The restored copy is verified before destination space is released. Which mirrored
+ * parents the original move created is not recorded, so every emptied folder below the base goes.
  */
 export async function restoreDirectory(transfer: DirectoryTransfer, options: TransferOptions): Promise<TransferResult> {
     const { original, destination } = transfer
