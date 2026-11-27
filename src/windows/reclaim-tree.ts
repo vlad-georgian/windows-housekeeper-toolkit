@@ -15,6 +15,11 @@ export function nativeEntryIdentity(stats: Pick<BigIntStats, 'dev' | 'ino' | 'bi
     }
 }
 
+export interface ReparseLink {
+    readonly kind: 'junction' | 'symlink'
+    readonly payload: string
+}
+
 export interface ReclamationEntry {
     readonly path: string
     readonly directory: boolean
@@ -23,6 +28,8 @@ export interface ReclamationEntry {
     readonly created: string
     readonly hash: string | null
     readonly readOnly: boolean
+    readonly links?: number
+    readonly link?: ReparseLink
     readonly permissions: string
     readonly children: readonly string[]
 }
@@ -32,13 +39,15 @@ export interface ReclamationGuard {
     readonly path: string
     readonly identity: string
     readonly junctionTarget?: string
+    readonly link?: ReparseLink
 }
 
-// Open with FILE_SHARE_READ only. Conflicting writer handles prevent acquisition;
-// held handles block new write/delete opens, and deletion requests force an image-section check.
+// Ordinary entries use FILE_SHARE_READ only. An alias group uses write-denying readers
+// and opens just one verified name for deletion at a time.
 const native = String.raw`
 using System;
 using System.ComponentModel;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -86,33 +95,57 @@ public static class HousekeeperReclamation {
         } finally { LocalFree(descriptor); }
     }
 
-    public static void Guard(SafeFileHandle handle, string identity, string target) {
+    private static void VerifyReparse(SafeFileHandle handle, string kind, string payload) {
+        var data = new byte[16384];
+        uint count;
+        if (!DeviceIoControl(handle, 0x000900A8, IntPtr.Zero, 0, data, (uint)data.Length, out count, IntPtr.Zero))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        bool junction = kind == "junction";
+        if (!junction && kind != "symlink") throw new IOException("Unsupported reparse kind.");
+        int header = junction ? 16 : 20;
+        uint tag = junction ? 0xA0000003u : 0xA000000Cu;
+        if (count < header || count != 8 + BitConverter.ToUInt16(data, 4) || BitConverter.ToUInt32(data, 0) != tag)
+            throw new IOException("The reparse tag or buffer changed.");
+        int offset = BitConverter.ToUInt16(data, 8), length = BitConverter.ToUInt16(data, 10);
+        uint flags = junction ? 0 : BitConverter.ToUInt32(data, 16);
+        if ((offset | length) % 2 != 0 || length == 0 || header + offset + length > count || flags > 1)
+            throw new IOException("Invalid reparse payload.");
+        string stored = Encoding.Unicode.GetString(data, header + offset, length);
+        string ntPrefix = new string((char)92, 1) + "??" + (char)92;
+        string longPrefix = new string((char)92, 2) + "?" + (char)92;
+        if (payload.StartsWith(longPrefix, StringComparison.Ordinal)) payload = payload.Substring(longPrefix.Length);
+        if (flags == 0 && payload.Length >= 3 && payload[1] == ':' && payload[2] == (char)92) payload = ntPrefix + payload;
+        if (!String.Equals(stored, payload, StringComparison.Ordinal))
+            throw new IOException("The stored reparse target changed.");
+    }
+
+    public static void Guard(SafeFileHandle handle, string identity, string kind, string payload) {
         FileInfo info;
         if (!GetFileInformationByHandle(handle, out info)) throw new Win32Exception(Marshal.GetLastWin32Error());
         string actual = info.Volume + ":" + (((ulong)info.IndexHigh << 32) | info.IndexLow) + ":" +
             (((decimal)(((ulong)info.CreatedHigh << 32) | info.CreatedLow) - 116444736000000000m) * 100m).ToString("0");
-        if (actual != identity || (info.Attributes & 0x10) == 0) throw new IOException("Path identity changed.");
-        if (String.IsNullOrEmpty(target)) {
-            if ((info.Attributes & 0x400) != 0) throw new IOException("An ancestor became a reparse point.");
-        } else {
-            var data = new byte[16384];
-            uint count;
-            if (!DeviceIoControl(handle, 0x000900A8, IntPtr.Zero, 0, data, (uint)data.Length, out count, IntPtr.Zero))
-                throw new Win32Exception(Marshal.GetLastWin32Error());
-            if (count < 16 || BitConverter.ToUInt32(data, 0) != 0xA0000003) throw new IOException("Expected a directory junction tag.");
-            int offset = BitConverter.ToUInt16(data, 8), length = BitConverter.ToUInt16(data, 10);
-            if ((offset | length) % 2 != 0 || 16 + offset + length > count) throw new IOException("Invalid junction payload.");
-            string stored = Encoding.Unicode.GetString(data, 16 + offset, length);
-            if (!String.Equals(stored, @"\??\" + Path.GetFullPath(target), StringComparison.OrdinalIgnoreCase))
-                throw new IOException("The stored junction target changed.");
-        }
-        Security(handle);
+        bool attached = !String.IsNullOrEmpty(kind);
+        if (actual != identity || ((info.Attributes & 0x10) != 0) != (kind != "symlink") ||
+            ((info.Attributes & 0x400) != 0) != attached) throw new IOException("Path identity or type changed.");
+        if (attached) VerifyReparse(handle, kind, payload);
     }
 
-    public static SafeFileHandle Open(string path, bool retiring) {
-        const uint genericRead = 0x80000000, delete = 0x00010000, shareRead = 1, openExisting = 3;
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandleW(SafeFileHandle handle, StringBuilder name, uint size, uint flags);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr FindFirstFileNameW(string path, uint flags, ref uint length, StringBuilder name);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool FindNextFileNameW(IntPtr handle, ref uint length, StringBuilder name);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool FindClose(IntPtr handle);
+
+    public static SafeFileHandle Open(string path, bool retiring, bool aliasGuard = false) {
+        const uint genericRead = 0x80000000, delete = 0x00010000, shareRead = 1, shareDelete = 4, openExisting = 3;
         const uint backupSemantics = 0x02000000, openReparsePoint = 0x00200000;
-        var handle = CreateFileW(path, genericRead | (retiring ? delete : 0), shareRead, IntPtr.Zero, openExisting,
+        var handle = CreateFileW(path, genericRead | (retiring ? delete : 0), shareRead | (aliasGuard ? shareDelete : 0), IntPtr.Zero, openExisting,
             backupSemantics | openReparsePoint, IntPtr.Zero);
         if (handle.IsInvalid) {
             var error = new Win32Exception(Marshal.GetLastWin32Error());
@@ -122,14 +155,54 @@ public static class HousekeeperReclamation {
         return handle;
     }
 
-    public static void Verify(SafeFileHandle handle, bool directory, string inode, string volume, string created, bool readOnly) {
+    public static void Verify(SafeFileHandle handle, bool directory, string inode, string volume, string created, bool readOnly, uint expectedLinks, string kind, string payload) {
         FileInfo info;
         if (!GetFileInformationByHandle(handle, out info)) throw new Win32Exception(Marshal.GetLastWin32Error());
-        if ((info.Attributes & 0x400) != 0 || ((info.Attributes & 0x10) != 0) != directory ||
+        bool attached = !String.IsNullOrEmpty(kind);
+        if (((info.Attributes & 0x400) != 0) != attached || ((info.Attributes & 0x10) != 0) != directory ||
             (((ulong)info.IndexHigh << 32) | info.IndexLow).ToString() != inode || info.Volume.ToString() != volume ||
             (((ulong)info.CreatedHigh << 32) | info.CreatedLow).ToString() != created ||
-            (!directory && (info.Links != 1 || ((info.Attributes & 1) != 0) != readOnly)))
+            (!attached && !directory && (info.Links != expectedLinks || ((info.Attributes & 1) != 0) != readOnly)))
             throw new IOException("The entry's identity, type, links, or attributes changed.");
+        if (attached) VerifyReparse(handle, kind, payload);
+    }
+
+    public static string RequireOpenedName(SafeFileHandle handle, string path) {
+        var buffer = new StringBuilder(32768);
+        var length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 8);
+        if (length == 0 || length >= buffer.Capacity) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (path.Length < 3 || path[1] != ':' || path[2] != (char)92 ||
+            !String.Equals(buffer.ToString(), new string((char)92, 2) + "?" + (char)92 + path, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("Opened alias name differs from the verified path.");
+        return path.Substring(2);
+    }
+
+    public static HashSet<string> AliasNames(string path, uint expectedCount) {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var name = new StringBuilder(32768);
+        uint size = (uint)name.Capacity;
+        var search = FindFirstFileNameW(path, 0, ref size, name);
+        if (search == new IntPtr(-1)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        try {
+            while (true) {
+                if (!names.Add(name.ToString()) || names.Count > expectedCount)
+                    throw new IOException("Hard-link membership changed.");
+                size = (uint)name.Capacity;
+                if (FindNextFileNameW(search, ref size, name)) continue;
+                int error = Marshal.GetLastWin32Error();
+                if (error != 38) throw new Win32Exception(error);
+                break;
+            }
+            if (names.Count != expectedCount) throw new IOException("Hard-link membership changed.");
+            return names;
+        } finally {
+            FindClose(search);
+        }
+    }
+
+    public static void RequireAliasNames(string path, HashSet<string> expected) {
+        if (!AliasNames(path, (uint)expected.Count).SetEquals(expected))
+            throw new IOException("Hard-link membership changed.");
     }
 
     public static string Hash(SafeFileHandle handle) {
@@ -161,29 +234,43 @@ export async function reclaimWindowsTree(
     await runPowerShell(
         `
         Add-Type -TypeDefinition $data.native
-        $sections = [Security.AccessControl.AccessControlSections]'Owner, Group, Access'
         $locked = [Collections.Generic.List[object]]::new()
         $heldPaths = [Collections.Generic.List[object]]::new()
         $path = $data.retiring[0].path
+        $groups = @{}
+        $retiringGroups = @{}
+        foreach ($entry in $data.retiring) {
+            if ($entry.links -gt 1) { $retiringGroups["$($entry.volume):$($entry.inode)"] = $true }
+        }
         try {
             foreach ($guard in $data.guards) {
                 $path = $guard.path
                 $handle = [HousekeeperReclamation]::Open($path, $false)
                 $heldPaths.Add($handle)
-                $target = if ($null -ne $guard.junctionTarget) { [string]$guard.junctionTarget } else { $null }
-                [HousekeeperReclamation]::Guard($handle, $guard.identity, $target)
+                $kind = if ($guard.link) { $guard.link.kind } elseif ($guard.junctionTarget) { 'junction' } else { $null }
+                $target = if ($guard.link) { $guard.link.payload } else { $guard.junctionTarget }
+                [HousekeeperReclamation]::Guard($handle, $guard.identity, $kind, $target)
+                [void][HousekeeperReclamation]::Security($handle)
             }
             foreach ($entry in @($data.retiring) + @($data.survivor)) {
                 $path = $entry.path
                 $remove = $locked.Count -lt $data.retiring.Count
-                $handle = [HousekeeperReclamation]::Open($path, $remove)
-                $locked.Add(@{ entry = $entry; handle = $handle })
-                [HousekeeperReclamation]::Verify($handle, $entry.directory, $entry.inode, $entry.volume, $entry.created, $entry.readOnly)
+                $links = if ($null -eq $entry.links) { 1 } else { $entry.links }
+                $key = "$($entry.volume):$($entry.inode)"
+                $aliased = $retiringGroups.ContainsKey($key)
+                $handle = [HousekeeperReclamation]::Open($path, ($remove -and !$aliased), $aliased)
+                $locked.Add(@{ entry = $entry; handle = $handle; key = $key; aliased = $aliased; links = $links })
+                [HousekeeperReclamation]::Verify($handle, $entry.directory, $entry.inode, $entry.volume, $entry.created, $entry.readOnly, $links, $entry.link.kind, $entry.link.payload)
+                if ($aliased) {
+                    $name = [HousekeeperReclamation]::RequireOpenedName($handle, $path)
+                    if (!$groups.ContainsKey($key)) { $groups[$key] = [HousekeeperReclamation]::AliasNames($path, $links) }
+                    if (!$groups[$key].Contains($name)) { throw 'The opened name is absent from the verified aliases.' }
+                }
             }
             foreach ($item in $locked) {
                 $entry = $item.entry
                 $path = $entry.path
-                if ($entry.directory) {
+                if ($entry.directory -and !$entry.link) {
                     $expected = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
                     foreach ($child in $entry.children) { $null = $expected.Add($child) }
                     foreach ($child in [IO.Directory]::EnumerateFileSystemEntries($path)) {
@@ -195,14 +282,38 @@ export async function reclaimWindowsTree(
             }
             foreach ($item in $locked) {
                 $path = $item.entry.path
-                if (!$item.entry.directory -and [HousekeeperReclamation]::Hash($item.handle) -ne $item.entry.hash) { throw 'File contents changed.' }
+                if (!$item.entry.directory -and !$item.entry.link -and [HousekeeperReclamation]::Hash($item.handle) -ne $item.entry.hash) { throw 'File contents changed.' }
+            }
+            # Validate complete group membership before any irreversible disposal.
+            foreach ($item in $locked) {
+                if ($item.aliased) {
+                    $path = $item.entry.path
+                    [HousekeeperReclamation]::RequireAliasNames($path, $groups[$item.key])
+                }
             }
             for ($i = $data.retiring.Count - 1; $i -ge 0; $i--) {
                 if ($null -ne $data.failAfter -and $data.retiring.Count - 1 - $i -eq $data.failAfter) { throw 'Simulated late deletion failure.' }
                 $item = $locked[$i]
                 $path = $item.entry.path
-                [HousekeeperReclamation]::Verify($item.handle, $item.entry.directory, $item.entry.inode, $item.entry.volume, $item.entry.created, $item.entry.readOnly)
-                [HousekeeperReclamation]::Remove($item.handle)
+                $entry = $item.entry
+                if ($item.aliased) {
+                    $names = $groups[$item.key]
+                    $remove = [HousekeeperReclamation]::Open($path, $true)
+                    try {
+                        $name = [HousekeeperReclamation]::RequireOpenedName($remove, $path)
+                        if (!$names.Contains($name)) { throw 'The retiring name is absent from the verified aliases.' }
+                        [HousekeeperReclamation]::RequireAliasNames($path, $names)
+                        [HousekeeperReclamation]::Verify($remove, $false, $entry.inode, $entry.volume, $entry.created, $entry.readOnly, $names.Count, $null, $null)
+                        [HousekeeperReclamation]::Remove($remove)
+                        $item.handle.Dispose()
+                        $null = $names.Remove($name)
+                    } finally {
+                        $remove.Dispose()
+                    }
+                } else {
+                    [HousekeeperReclamation]::Verify($item.handle, $entry.directory, $entry.inode, $entry.volume, $entry.created, $entry.readOnly, $item.links, $entry.link.kind, $entry.link.payload)
+                    [HousekeeperReclamation]::Remove($item.handle)
+                }
             }
         } catch {
             throw "Could not safely reclaim the old copy at $($data.retiring[0].path). $($path): $($_.Exception.Message)"
@@ -214,4 +325,29 @@ export async function reclaimWindowsTree(
         { native, retiring, survivor, guards, failAfter },
         60_000
     )
+}
+
+/** Reads the link object's security without opening its target. */
+export async function readReparsePermissions(paths: readonly (ReclamationGuard & { readonly link: ReparseLink })[]): Promise<readonly string[]> {
+    if (paths.length === 0) return []
+    const json = await runPowerShell(
+        `
+        Add-Type -TypeDefinition $data.native
+        $permissions = @(foreach ($entry in $data.paths) {
+            $handle = [HousekeeperReclamation]::Open($entry.path, $false)
+            try {
+                [HousekeeperReclamation]::Guard($handle, $entry.identity, $entry.link.kind, $entry.link.payload)
+                [HousekeeperReclamation]::Security($handle)
+            } finally { $handle.Dispose() }
+        })
+        ConvertTo-Json -InputObject $permissions -Compress
+        `,
+        { native, paths },
+        60_000
+    )
+    const values: unknown = JSON.parse(json)
+    if (!Array.isArray(values) || values.length !== paths.length || !values.every((value) => typeof value === 'string')) {
+        throw new Error('Windows returned incomplete reparse permissions.')
+    }
+    return values
 }
