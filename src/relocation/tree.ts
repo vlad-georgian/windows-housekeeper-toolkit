@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import { chmod, copyFile, lstat, mkdir, open, readdir, rmdir, unlink, utimes, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 import { readWindowsFilePermissions } from '../windows/file-permissions.ts'
-import { requireDirectoryIdentity } from './directory-path.ts'
+import { reclaimWindowsTree, type ReclamationEntry } from '../windows/reclaim-tree.ts'
+import { type DirectoryIdentity, requireDirectoryIdentity } from './directory-path.ts'
 
 /** A directory tree holds something relocation cannot copy faithfully yet, such as a link. */
 export class UnsupportedTreeError extends Error {}
@@ -166,14 +167,51 @@ export async function copyTree(source: string, target: string, onCreated?: () =>
     })
 }
 
-/** Verifies the tree and any surviving copy before removing it. */
-export async function removeTree(root: string, manifest: TreeManifest, identity?: string, verifySurvivor?: () => Promise<void>): Promise<void> {
+async function reclamationEntries(root: string, manifest: TreeManifest): Promise<ReclamationEntry[]> {
+    const children = new Map<string, string[]>()
+    for (const entry of manifest.entries) {
+        const path = join(root, entry.path)
+        const parent = dirname(path)
+        const names = children.get(parent) ?? []
+        names.push(basename(path))
+        children.set(parent, names)
+    }
+    const entries: ReclamationEntry[] = []
+    for (const [index, { path, kind }] of permissionPaths(root, manifest.entries).entries()) {
+        const stats = await lstat(path, { bigint: true })
+        const entry = manifest.entries[index - 1]
+        const permissions = manifest.permissions[index]
+        if (!permissions || stats.ino === 0n || stats.isSymbolicLink() || (kind === 'directory' ? !stats.isDirectory() : !stats.isFile())) {
+            throw new Error(`Cannot verify the entry at ${path}.`)
+        }
+        // Win32 FILETIME counts 100 ns intervals from 1601, while Bun's birthtimeNs uses the Unix epoch.
+        const created = String(stats.birthtimeNs / 100n + 116_444_736_000_000_000n)
+        entries.push({
+            path,
+            directory: kind === 'directory',
+            inode: String(stats.ino),
+            volume: String(stats.dev),
+            created,
+            hash: entry?.sha256 ?? null,
+            readOnly: entry?.readOnly ?? false,
+            permissions,
+            children: children.get(path) ?? []
+        })
+    }
+    return entries
+}
+
+/** Verifies both trees again under write-denying handles, and deletes only the validated old entries. */
+export async function removeTree(root: string, manifest: TreeManifest, identity?: string, verifySurvivor?: () => Promise<void>, survivor?: DirectoryIdentity): Promise<void> {
     if (identity !== undefined) await requireDirectoryIdentity(root, identity)
     await verifyTreeContents(root, manifest)
     await verifyTreePermissions(root, manifest)
+    const retiring = await reclamationEntries(root, manifest)
+    const retained = survivor ? await reclamationEntries(survivor.path, manifest) : []
     await verifySurvivor?.()
     if (identity !== undefined) await requireDirectoryIdentity(root, identity)
-    await removeVerifiedTree(root)
+    if (survivor) await requireDirectoryIdentity(survivor.path, survivor.identity)
+    await reclaimWindowsTree(retiring, retained)
 }
 
 /** Removes a tree of plain files and directories, clearing read-only flags. Refuses links. */

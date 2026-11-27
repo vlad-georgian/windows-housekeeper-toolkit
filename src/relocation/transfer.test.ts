@@ -362,3 +362,41 @@ test.each(['move', 'restore'] as const)('keeps the intact copy when the final %s
     await chmod(join(intact, 'app-3.4.0', 'locked.dat'), 0o666)
     expect(await readFile(join(intact, 'Update.exe'), 'utf8')).toBe('updater')
 })
+
+test.each([
+    { action: 'move', changedSide: 'retiring' },
+    { action: 'move', changedSide: 'surviving' },
+    { action: 'move', changedSide: 'new entry' },
+    { action: 'restore', changedSide: 'retiring' },
+    { action: 'restore', changedSide: 'surviving' },
+    { action: 'restore', changedSide: 'new entry' }
+] as const)(
+    'keeps both copies when $action changes the $changedSide side during survivor verification',
+    async ({ action, changedSide }) => {
+        const transfer = { appId: 'github-desktop', original, destination, base }
+        if (action === 'restore') await moveDirectory(transfer, { journal })
+        const perform = action === 'move' ? moveDirectory : restoreDirectory
+        const survivor = action === 'move' ? destination : original
+        let changedPath = ''
+        const error = await rejection(
+            perform(transfer, {
+                journal,
+                async afterVerifyingSurvivor(record) {
+                    const retiring = record.aside ?? destination
+                    changedPath = changedSide === 'surviving' ? join(survivor, 'Update.exe') : join(retiring, changedSide === 'new entry' ? 'new.txt' : 'Update.exe')
+                    await writeFile(changedPath, 'written during verification')
+                }
+            })
+        )
+
+        expect(error).toBeInstanceOf(IncompleteTransferError)
+        expect(error).toHaveProperty('message', expect.stringContaining(changedPath))
+        const [record] = await journal.list()
+        if (!record) throw new Error('Expected a retained recovery record.')
+        const retiring = record.aside ?? destination
+        await chmod(join(retiring, 'app-3.4.0', 'locked.dat'), 0o666)
+        expect(await readFile(changedPath, 'utf8')).toBe('written during verification')
+        expect(await readFile(join(changedSide === 'surviving' ? retiring : survivor, 'Update.exe'), 'utf8')).toBe('updater')
+    },
+    15_000
+)

@@ -122,6 +122,17 @@ descriptor stops the transfer. Clear a migrated application to restore its
 latest files to the original paths. Both operations verify the surviving copy
 at its final path before removing the old copy. Restore keeps empty parents.
 
+Reclamation opens every validated entry in both trees with Windows handles
+that deny write and delete sharing, then checks identities, permissions,
+directory membership, and file hashes again. It deletes only the validated
+old entries through those handles. An open writer or a verification failure
+keeps the recovery record. A new old-tree entry is left in place and prevents
+its parent from being removed. Unsupported handle deletion or an error during
+deletion can leave a partially reclaimed old tree beside the verified copy.
+These checks rely on Windows file-sharing enforcement and the filesystem's
+identity and deletion support. They do not provide a filesystem snapshot or
+protection against privileged storage changes.
+
 An application with both local paths and paths mirrored under one base appears
 as partially migrated. Check it to finish moving to that base, or leave it
 clear to restore the relocated paths. If one path fails during a move or

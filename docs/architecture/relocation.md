@@ -58,6 +58,17 @@ verify by identity. The record is kept if safe undo or final reclamation
 fails. The operation holds back the affected app and points to the journal
 and the [manual recovery procedure](../../README.md#recovering-an-interrupted-relocation).
 
+`windows/reclaim-tree.ts` performs the final reclamation through Windows
+handles. It opens all expected entries of both copies with read sharing,
+checks volume, file ID, creation time, type, links, attributes, ACLs, directory
+membership, and file hashes, then deletes only retiring handles in reverse
+tree order. Write probes and the earlier survivor callback finish before these
+final hashes. The survivor handles stay open until deletion ends. A new entry
+is never added to the deletion list. If it appears after enumeration, Windows
+refuses deletion of its nonempty parent and the transfer keeps its journal.
+Any failure before deletion preserves the old tree. A later failure may leave
+the old tree partly reclaimed, with its changed entries and recovery record.
+
 ## Tests
 
 Tests use disposable sandbox profiles and never touch the real profile. The
