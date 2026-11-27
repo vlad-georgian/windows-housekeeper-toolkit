@@ -151,7 +151,9 @@ describe('temporary directory contents removal', () => {
         await sandbox.file(join('Users', 'test', 'AppData', 'Local', 'Temp', 'b.tmp'))
         const { removed, callbacks } = recorder()
 
-        await expect(removeContentsCandidate(candidate, callbacks)).rejects.toThrow('changed after detection')
+        const failure = await removeContentsCandidate(candidate, callbacks).catch((error: unknown) => error)
+        expect(failure).toBeInstanceOf(Error)
+        expect(String(failure)).toContain('changed after detection')
         expect(removed).toEqual([])
         expect(await readdir(root)).toEqual(['b.tmp'])
     })
