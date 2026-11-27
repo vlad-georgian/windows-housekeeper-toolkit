@@ -40,6 +40,18 @@ Each package cache states its redownload and offline-use implications.
 | [`chocolatey-cleaner.ts`](../../src/cleaners/package-cache/chocolatey-cleaner.ts) | Finds the per-user `%TEMP%\chocolatey` download cache when Chocolatey's `cacheLocation` setting is the default.  |
 | [`nuget-cleaner.ts`](../../src/cleaners/package-cache/nuget-cleaner.ts)           | Finds NuGet's download and HTTP caches. Preserves the global packages folder that projects use.                  |
 
+## Windows temporary directory cleanup: [`windows-temp/`](../../src/cleaners/windows-temp/)
+
+Each cleaner offers the contents of one per-user directory as a single candidate.
+The directory stays, every entry is attempted regardless of age, and locked
+entries are skipped. A `TEMP` outside `<LocalAppData>\Temp` is not offered.
+
+| File                                                                                             | Responsibility                                                                               |
+| ------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| [`temporary-contents-cleaner.ts`](../../src/cleaners/windows-temp/temporary-contents-cleaner.ts) | Shares detection and removal through `filesystem/temporary-contents.ts`.                     |
+| [`user-temp-cleaner.ts`](../../src/cleaners/windows-temp/user-temp-cleaner.ts)                   | Offers the contents of the per-user Temp directory and folders inside `<LocalAppData>\Temp`. |
+| [`internet-cache-cleaner.ts`](../../src/cleaners/windows-temp/internet-cache-cleaner.ts)         | Offers the contents of `<LocalAppData>\Microsoft\Windows\INetCache`.                         |
+
 ## Old data and installations: [`installations/`](../../src/cleaners/installations/)
 
 Updater cleaners offer payloads for installed updates only. Pending updates
