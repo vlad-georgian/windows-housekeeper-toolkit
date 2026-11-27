@@ -7,6 +7,8 @@ export interface RelocationPath {
     readonly nativeLauncherRoot?: string
     readonly linkedSelector?: { readonly owner: string; readonly entry: string; readonly selector: string }
     readonly verifyFile?: (target: string) => Promise<boolean>
+    /** Require ownership evidence for an optional package-manager path. */
+    readonly verifyDirectory?: (target: string) => Promise<boolean>
     readonly kind?: 'directory' | 'file'
     /** What the directory holds, such as "installation" or "data". */
     readonly description: string

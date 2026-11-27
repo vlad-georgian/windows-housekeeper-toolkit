@@ -2,13 +2,13 @@ import { readlink, realpath } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import { pathExists } from '../core/filesystem/index.ts'
-import { canonicalPathKey, isUnavailablePath, UnverifiedPathError } from '../core/filesystem/paths.ts'
+import { canonicalPathKey, isPathInside, isUnavailablePath, UnverifiedPathError } from '../core/filesystem/paths.ts'
 import { errorMessage, formatBytes } from '../core/format.ts'
 import { cancelled, type Cancelled, type LaunchOperation, type LaunchPrompts, type PlanSection } from '../launch/types.ts'
 import type { DriveTypeLookup } from '../windows/drives.ts'
 import { isAppRunning, type WindowsProcess } from '../windows/processes.ts'
 import { type DirectoryIdentity, inspectDestinationPath, readDirectoryIdentity } from './directory-path.ts'
-import { type AppInspection, type OriginalLink, inspectApp, inspectPath, moveSteps } from './inspect.ts'
+import { type AppInspection, claimRelocationPaths, type OriginalLink, inspectApp, inspectPath, moveSteps } from './inspect.ts'
 import type { RecoveryJournal } from './journal.ts'
 import { relocationBaseOf, validateRelocationBase, type VolumeComparison } from './layout.ts'
 import { IncompleteTransferError, linksTo, moveDirectory, restoreDirectory, type TransferResult } from './transfer.ts'
@@ -109,6 +109,8 @@ async function sizeOf(path: string, seen: Set<string>): Promise<{ size: string }
 async function checklistHint(inspection: AppInspection): Promise<string> {
     if (inspection.migratedBase) return `On ${inspection.migratedBase}`
     if (inspection.restoreBase) return `Partially migrated to ${inspection.restoreBase}. Check to finish moving, or leave clear to restore.`
+    const blocked = inspection.applicable.find((entry) => entry.state.kind === 'unsupported')
+    if (blocked?.state.kind === 'unsupported') return blocked.state.reason
     const seen = new Set<string>()
     const local = inspection.applicable.filter((entry) => entry.state.kind === 'local')
     let bytes = 0
@@ -122,6 +124,34 @@ async function checklistHint(inspection: AppInspection): Promise<string> {
     }
     const linked = inspection.applicable.length - local.length
     return `${formatBytes(bytes)} local${linked > 0 ? `, ${linked} path(s) already linked` : ''}`
+}
+
+function isActionRunning(action: AppAction, processes: readonly WindowsProcess[]): boolean {
+    const guard = action.app.processGuardId
+    const packageProcesses =
+        guard === 'vite-plus-relocation' || guard === 'bun-relocation'
+            ? processes.filter((entry) => {
+                  const args = entry.commandLine?.replace(/^(?:"[^"]+"|\S+)\s*/u, '').replaceAll('\\', '/')
+                  // The normal CLI launch can leave these wrappers alive. Neither wrapper uses
+                  // the package data, and the paths below still guard any runtime inside it.
+                  if (/^vp\.exe$/iu.test(entry.name) && args === 'run start') return false
+                  return !(/^bun\.exe$/iu.test(entry.name) && args === 'run src/index.ts')
+              })
+            : processes
+    if (isAppRunning(guard, packageProcesses)) return true
+    const directories = action.transfers.flatMap((entry) => {
+        if (entry.kind === 'file') return []
+        return [entry.original, entry.destination, ...(entry.originalLink ? [entry.originalLink.target] : [])]
+    })
+    return processes.some(
+        (processInfo) =>
+            processInfo.id !== process.pid &&
+            directories.some((directory) => {
+                if (processInfo.path && isPathInside(processInfo.path, directory)) return true
+                const command = processInfo.commandLine?.replaceAll('/', '\\').toLowerCase()
+                return command?.includes(`${canonicalPathKey(directory)}\\`) ?? false
+            })
+    )
 }
 
 async function askForBase(prompts: LaunchPrompts, options: RelocationOptions, originals: readonly string[], suggestion: string | null): Promise<string | Cancelled> {
@@ -236,7 +266,7 @@ async function applyAction(action: AppAction, prompts: LaunchPrompts, options: R
         await options.report({ kind: 'previewed', appId: app.id, action: action.action })
         return
     }
-    if (isAppRunning(app.processGuardId, await options.listProcesses())) {
+    if (isActionRunning(action, await options.listProcesses())) {
         const reason = `${app.label} is running. Close it and try again.`
         prompts.log(`${reason} Nothing was changed.`)
         await options.report({ kind: 'skipped', appId: app.id, reason })
@@ -268,6 +298,7 @@ async function applyAction(action: AppAction, prompts: LaunchPrompts, options: R
             const entry = app.paths.find((path) => path.path === original)
             const physical = source.originalLink?.target ?? original
             if (entry?.verifyFile && !(await entry.verifyFile(physical))) throw new Error(`Could not verify the app owns ${original}.`)
+            if (entry?.verifyDirectory && !(await entry.verifyDirectory(physical))) throw new Error(`Could not verify the app owns ${original}.`)
             if (
                 action.action === 'move' &&
                 source.originalLink &&
@@ -329,15 +360,23 @@ export function createRelocationOperation(options: RelocationOptions): LaunchOpe
                     `An interrupted ${record.action} of ${record.original} needs attention (${record.phase}, record ${record.id}). Close the app and preserve the copies listed in ${options.journal.location}. See "Recovering an interrupted relocation" in the README.`
                 )
             }
-            const inspections: AppInspection[] = []
+            const catalog: AppInspection[] = []
             for (const app of options.catalog) {
-                if (held.has(app.id)) continue
                 const inspection = await inspectApp(app, options.home, options)
                 if ('blocked' in inspection) {
-                    prompts.log(`${app.label} cannot be relocated. ${inspection.blocked}`)
+                    if (!held.has(app.id)) prompts.log(`${app.label} cannot be relocated. ${inspection.blocked}`)
                     continue
                 }
-                if (inspection.applicable.length > 0) inspections.push(inspection)
+                catalog.push(inspection)
+            }
+            const inspections: AppInspection[] = []
+            for (const [index, claimed] of (await claimRelocationPaths(catalog, options.home, options)).entries()) {
+                const app = catalog[index]!.app
+                if ('blocked' in claimed) {
+                    if (!held.has(app.id) && catalog[index]!.applicable.length > 0) prompts.log(`${app.label} cannot be relocated. ${claimed.blocked}`)
+                    continue
+                }
+                if (!held.has(app.id) && claimed.applicable.length > 0) inspections.push(claimed)
             }
             if (inspections.length === 0) {
                 prompts.log(`${title}: no supported apps were found.`)
@@ -391,7 +430,7 @@ export function createRelocationOperation(options: RelocationOptions): LaunchOpe
 
             const processes = await options.listProcesses()
             for (const action of actions) {
-                if (isAppRunning(action.app.processGuardId, processes)) lines.push(`${action.app.label} is running. Close it before applying, or it will be skipped.`)
+                if (isActionRunning(action, processes)) lines.push(`${action.app.label} is running. Close it before applying, or it will be skipped.`)
             }
             return {
                 title,

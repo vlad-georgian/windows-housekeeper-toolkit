@@ -3,6 +3,7 @@ import { errorMessage } from '../core/format.ts'
 import type { SystemPaths } from '../core/system-paths.ts'
 import type { LaunchOperation } from '../launch/types.ts'
 import { windowsDriveType } from '../windows/drives.ts'
+import { runPowerShell } from '../windows/powershell.ts'
 import { listWindowsProcesses } from '../windows/processes.ts'
 import { createRelocationCatalog } from './apps/index.ts'
 import { createRecoveryJournal } from './journal.ts'
@@ -15,7 +16,9 @@ function auditDetails(event: RelocationEvent): Record<string, unknown> {
 
 /** The launch-menu relocation operation for the current user, recorded in the run's audit log. */
 export function createRelocationLaunchOperation(paths: SystemPaths, session: CleanupSession): LaunchOperation {
-    const catalog = createRelocationCatalog(paths)
+    const catalog = createRelocationCatalog(paths, process.env, async () =>
+        runPowerShell("[Environment]::GetEnvironmentVariable('ChocolateyInstall', 'Machine')", undefined, 5_000).catch(() => null)
+    )
     const labelOf = (appId: string): string => catalog.find((app) => app.id === appId)?.label ?? appId
     return createRelocationOperation({
         home: paths.home,

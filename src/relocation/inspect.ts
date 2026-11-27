@@ -78,13 +78,18 @@ export async function inspectPath(path: string, kind: RelocationPath['kind'] = '
 export async function inspectApp(
     app: RelocatableApp,
     home: string,
-    validation: Pick<BaseValidationOptions, 'driveType' | 'volumesDiffer'> = { driveType: windowsDriveType, volumesDiffer: differentVolumes }
+    validation: RelocationValidation = { driveType: windowsDriveType, volumesDiffer: differentVolumes }
 ): Promise<AppInspection | { blocked: string }> {
     const outside = app.paths.find((entry) => !isPathInside(entry.path, home))
     if (outside) return { blocked: `${outside.path} is outside the Windows profile ${home}` }
     const inspected: InspectedPath[] = []
     for (const entry of app.paths) {
         let state = await inspectPath(entry.path, entry.kind, entry.verifyLegacyTarget)
+        if (entry.verifyDirectory) {
+            if (state.kind === 'unsupported') continue
+            if (state.kind === 'linked' && !relocationBaseOf(state.target, home, entry.path)) continue
+            if ((state.kind === 'local' || state.kind === 'linked') && !(await entry.verifyDirectory(state.kind === 'linked' ? state.target : entry.path))) continue
+        }
         if (entry.verifyFile && (state.kind === 'local' || state.kind === 'linked') && !(await entry.verifyFile(state.kind === 'linked' ? state.target : entry.path))) {
             state = { kind: 'unsupported', reason: `Could not verify the app owns ${entry.path}` }
         }
@@ -102,7 +107,17 @@ export async function inspectApp(
             const root = owner?.state.kind === 'linked' ? owner.state.target : owner?.state.kind === 'local' ? owner.path : undefined
             return Object.assign(entry, { nativeDependency: !!root && entry.state.kind === 'linked' && isPathInside(entry.state.target, root) })
         })
+    return summarizeApp(app, applicable, home, validation)
+}
 
+type RelocationValidation = Pick<BaseValidationOptions, 'driveType' | 'volumesDiffer'>
+
+async function summarizeApp(
+    app: RelocatableApp,
+    applicable: readonly InspectedPath[],
+    home: string,
+    validation: RelocationValidation
+): Promise<AppInspection | { blocked: string }> {
     const nonLocal = applicable.filter((entry) => entry.state.kind !== 'local')
     for (const { state } of nonLocal) if (state.kind === 'unsupported') return { blocked: state.reason }
     const bases = nonLocal.map((entry) => (entry.state.kind === 'linked' && !entry.state.indirect ? relocationBaseOf(entry.state.target, home, entry.path) : null))
@@ -118,6 +133,53 @@ export async function inspectApp(
     }
     const migratedBase = nonLocal.length === applicable.length ? restoreBase : null
     return { app, applicable, migratedBase, restoreBase }
+}
+
+function physicalTree(entry: InspectedPath): string | null {
+    if (entry.kind === 'file') return null
+    if (entry.state.kind === 'local') return entry.path
+    return entry.state.kind === 'linked' ? entry.state.target : null
+}
+
+/** Give exact names and descendants to one catalog owner before building the checklist.
+ * Distinct names with overlapping backing trees need independent target ownership. */
+export async function claimRelocationPaths(
+    inspections: readonly AppInspection[],
+    home: string,
+    validation: RelocationValidation
+): Promise<(AppInspection | { blocked: string })[]> {
+    const entries = inspections.flatMap((inspection) => inspection.applicable)
+    const claimed: InspectedPath[] = []
+    for (const entry of entries.toSorted((a, b) => a.path.length - b.path.length)) {
+        if (claimed.some((owner) => physicalTree(owner) !== null && isPathInside(entry.path, owner.path))) continue
+        const duplicate = claimed.findIndex((owner) => canonicalPathKey(owner.path) === canonicalPathKey(entry.path))
+        if (duplicate === -1) claimed.push(entry)
+        else if (claimed[duplicate]?.state.kind === 'unsupported' && entry.state.kind !== 'unsupported') claimed[duplicate] = entry
+    }
+    const conflicts = new Map<InspectedPath, string>()
+    for (const [index, entry] of claimed.entries()) {
+        const tree = physicalTree(entry)
+        if (!tree) continue
+        for (const other of claimed.slice(index + 1)) {
+            const backing = physicalTree(other)
+            if (backing && (canonicalPathKey(tree) === canonicalPathKey(backing) || isPathInside(tree, backing) || isPathInside(backing, tree))) {
+                conflicts.set(entry, other.path)
+                conflicts.set(other, entry.path)
+            }
+        }
+    }
+    const owners = new Set(claimed)
+    return Promise.all(
+        inspections.map(async ({ app, applicable }) => {
+            const paths: InspectedPath[] = []
+            for (const entry of applicable) {
+                if (!owners.has(entry)) continue
+                const conflict = conflicts.get(entry)
+                paths.push(conflict ? { ...entry, state: { kind: 'unsupported', reason: `${entry.path} shares a backing tree with ${conflict}` } } : entry)
+            }
+            return summarizeApp(app, paths, home, validation)
+        })
+    )
 }
 
 /** What moving one applicable path under `base` involves. */

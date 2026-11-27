@@ -54,6 +54,37 @@ Codex’s visible bin keeps targeting the original standalone selector when its
 payload matches the selected release store. Links to unavailable targets and
 read-only hard links block the transfer.
 
+## Package-manager ownership
+
+The catalog verifies package paths inside the profile before offering them and
+rechecks ownership at apply time. Standalone Node.js needs a Node executable
+and a bundled npm manifest in a known per-user installation directory.
+
+- Scoop moves `apps` after verifying the Scoop launcher in a release under
+  that tree. Its `shims` and `persist` directories stay at their original
+  locations. The mover re-creates version junctions and keeps app links to
+  persistent data pointed at their existing targets.
+  [Scoop folder layout](https://github.com/ScoopInstaller/Scoop/wiki/Scoop-Folder-Layout)
+- Vite+ verifies the launcher and active release manifest before moving its
+  managed releases and runtimes. The shared launcher directory stays in place.
+  [Vite+ Windows installation](https://github.com/voidzero-dev/vite-plus/blob/main/CONTRIBUTING.md#windows)
+- npm moves verified global `node_modules` and the npm content cache.
+  The prefix's launcher files stay in place.
+  [npm folders](https://docs.npmjs.com/cli/configuring-npm/folders/)
+- Bun checks the global installation manifest and lockfile. It can also move
+  a verified download cache when that cache has no shared global store.
+  Existing global launchers keep their paths.
+  [Bun configuration](https://bun.com/docs/runtime/bunfig)
+- Chocolatey verifies the user-profile installation layout and checks the
+  machine setting before offering to move the package library. The binary
+  and shims stay in place.
+  [Chocolatey non-administrative installation](https://docs.chocolatey.org/en-us/choco/setup/#non-administrative-install)
+
+The planner gives a configured path and its descendants to one catalog owner
+before building the checklist. This keeps an npm prefix inside Scoop or Vite+
+with the manager. Distinct roots that point into overlapping backing trees
+are held back until their ownership is unambiguous.
+
 ## Moving a directory
 
 1. Check that the destination is below the relocation base and its ancestor
