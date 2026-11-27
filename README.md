@@ -152,25 +152,23 @@ configured data outside the Windows profile is skipped individually.
    find the reported record ID, and preserve the data at its `original`,
    `destination`, `staging`, and `aside` paths. A phase tells you where the
    operation stopped. Verify each copy and junction before moving any files.
-2. If the original path is missing, look for the intact original at `aside`
-   during a move, or for the verified copy at `staging` during a restore.
-   Check which copy contains the latest files, then put a verified copy back
-   at the original path. If the original already works, preserve the other
-   copies separately until you can account for their contents and ownership.
+2. Use the recorded phase to identify the copy to verify.
 
     For `copying`, the original move source or restore destination is still
     authoritative. Keep `staging` until you have checked it for later changes.
-    For `swapping`, inspect the actual directories and junctions because the
-    rename may have completed before interruption. Restore service from a
-    complete verified copy, keeping all other copies for comparison.
+    For `swapping`, inspect the recorded paths because a rename may have
+    completed before interruption. If `original` is missing, check `aside`
+    during a move or `staging` during a restore. Restore access from a complete
+    verified copy, keeping the other copies for comparison.
 
-    For `reclaiming`, the destination should hold the final copy and `original`
-    should be its junction. For `releasing`, `original` should hold the final
-    restored copy. Verify that copy's full contents and permissions. The
+    For `reclaiming`, verify the full contents and permissions of `destination`.
+    If the junction at `original` is missing, verify its ancestors before
+    recreating the junction to the verified destination. For `releasing`, verify
+    the full contents and permissions of the restored copy at `original`. The
     retiring `aside` or destination may already be partly deleted. Preserve
     its remainder, compare it with the final copy, and recover any newer or
     extra files individually before archiving it. A partial tree cannot serve
-    as a complete restore source. If the junction or an ancestor changed,
+    as a complete restore source. If a junction or an ancestor changed,
     resolve that mismatch before using any recorded path for recovery.
 
 3. After confirming the app can use the expected files at its original path,
