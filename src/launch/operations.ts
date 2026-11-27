@@ -1,13 +1,13 @@
-import type { CleanupSession } from "../cleanup/operations.ts";
-import { createCleanupOperations } from "../cleanup/operations.ts";
-import type { SystemPaths } from "../core/system-paths.ts";
-import type { AppCleaner } from "../core/types.ts";
-import type { LaunchOperation } from "./types.ts";
+import type { CleanupSession } from '../cleanup/operations.ts'
+import { createCleanupOperations } from '../cleanup/operations.ts'
+import type { SystemPaths } from '../core/system-paths.ts'
+import type { AppCleaner } from '../core/types.ts'
+import type { LaunchOperation } from './types.ts'
 
 export interface LaunchContext {
-    readonly paths: SystemPaths;
-    readonly cleaners: readonly AppCleaner[];
-    readonly cleanup: CleanupSession;
+    readonly paths: SystemPaths
+    readonly cleaners: readonly AppCleaner[]
+    readonly cleanup: CleanupSession
 }
 
 /**
@@ -15,5 +15,5 @@ export interface LaunchContext {
  * `LaunchOperation` in its own module and listing it here.
  */
 export function createLaunchOperations(context: LaunchContext): LaunchOperation[] {
-    return [...createCleanupOperations(context.cleaners, context.cleanup)];
+    return [...createCleanupOperations(context.cleaners, context.cleanup)]
 }
