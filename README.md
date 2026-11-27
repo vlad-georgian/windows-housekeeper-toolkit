@@ -82,6 +82,15 @@ with launch checks enabled. Status explains when the installed variant updates
 in-app, has an all-or-nothing control, or has no verified background mechanism
 the CLI can disable while preserving in-app updates.
 
+The launch menu also offers **Manage automatic startup**. It lists the verified
+per-user sign-in (HKCU Run) entries of the apps above to turn off, and entries
+saved earlier to restore. Other startup mechanisms, such as machine-wide Run
+values, Startup folders, scheduled tasks, and packaged startup tasks, are
+listed but not changed. The combined plan shows each exact entry, and nothing
+changes until you confirm. It uses the same saved preferences as
+`startup disable` and `startup restore`, and does not change the sign-in
+enforcement switch.
+
 ## Windows sign-in
 
 Cleanup and startup preference enforcement have independent switches. Sign-in

@@ -2,7 +2,7 @@ import { type AppId, type AppInventory, isAppId, isArrayOf, isRecord, isString, 
 import { runPowerShell } from '../powershell.ts'
 import { directTargetScript } from './registry.ts'
 
-interface StartupEntry {
+export interface StartupEntry {
     app: AppId
     name: string
     source: string
@@ -13,7 +13,7 @@ interface StartupEntry {
     supported: boolean
 }
 
-interface StartupInventory {
+export interface StartupInventory {
     entries: StartupEntry[]
     warnings: string[]
 }

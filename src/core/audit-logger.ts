@@ -109,6 +109,10 @@ export class AuditLogger {
         })
     }
 
+    async recordStartupChanges(messages: readonly string[], failures: number, dryRun: boolean): Promise<void> {
+        await this.write('startup-changes', { dryRun, messages, failures })
+    }
+
     async recordStartupEnforcement(messages: readonly string[], failures: number): Promise<void> {
         await this.write('startup-preference-enforcement', { messages, failures })
     }

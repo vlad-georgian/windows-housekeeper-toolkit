@@ -20,13 +20,31 @@ packaged startup tasks, and scheduled logon tasks. Disable and restore
 operate on verified `HKCU Run` entries. The CLI saves the original entry
 before removing it and records a pending restore before writing it back.
 
-| File                                                             | Responsibility                                                                              |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| [`index.ts`](../../src/windows/app-startup/index.ts)             | Implements startup disable, restore, and sign-in enforcement.                               |
-| [`inventory.ts`](../../src/windows/app-startup/inventory.ts)     | Reads startup locations and matches entries to installed executables.                       |
-| [`preferences.ts`](../../src/windows/app-startup/preferences.ts) | Defines, validates, and persists preferences in `app-startup.json`.                         |
-| [`registry.ts`](../../src/windows/app-startup/registry.ts)       | Verifies the executable and exact registry value before a change, then verifies the result. |
-| [`status.ts`](../../src/windows/app-startup/status.ts)           | Prints the startup and service inventory and opens Windows Startup settings.                |
+| File                                                             | Responsibility                                                                                 |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| [`index.ts`](../../src/windows/app-startup/index.ts)             | Console wrappers for startup disable, restore, and sign-in enforcement on the Windows backend. |
+| [`manager.ts`](../../src/windows/app-startup/manager.ts)         | Shared disable, restore, and enforcement logic. The CLI and the launch menu both use it.       |
+| [`backend.ts`](../../src/windows/app-startup/backend.ts)         | `StartupBackend`, the only way to read or write Windows startup entries. Tests inject a fake.  |
+| [`inventory.ts`](../../src/windows/app-startup/inventory.ts)     | Reads startup locations and matches entries to installed executables.                          |
+| [`preferences.ts`](../../src/windows/app-startup/preferences.ts) | Defines, validates, and persists preferences in `app-startup.json`.                            |
+| [`registry.ts`](../../src/windows/app-startup/registry.ts)       | Verifies the executable and exact registry value before a change, then verifies the result.    |
+| [`status.ts`](../../src/windows/app-startup/status.ts)           | Prints the startup and service inventory and opens Windows Startup settings.                   |
+
+### Startup launch operation
+
+The launch menu's **Manage automatic startup** operation lives in
+[`src/startup/`](../../src/startup). A `StartupProvider` inspects one source
+and returns checklist groups of `StartupChoice` values plus notes about
+entries it will not change. Each choice states its plan lines and applies
+itself. The operation owns prompting, the combined plan, dry runs, and
+failure accounting. App-owned services plug in by adding another provider to
+`createLaunchOperations`.
+
+| File                                                         | Responsibility                                                                                             |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| [`types.ts`](../../src/startup/types.ts)                     | Defines `StartupProvider`, `StartupGroup`, `StartupChoice`, and `StartupNote`.                             |
+| [`operation.ts`](../../src/startup/operation.ts)             | Builds the launch operation from providers. A failed change is recorded and the rest still run.            |
+| [`signin-provider.ts`](../../src/startup/signin-provider.ts) | Offers verified HKCU Run entries to disable and saved preferences to restore. It reports other mechanisms. |
 
 ## Updates
 
