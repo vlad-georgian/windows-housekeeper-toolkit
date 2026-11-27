@@ -33,7 +33,17 @@ checklist for destructive cache cleanup. Every item starts unchecked, including
 after toggling all launch operations. Checking an app includes all of its
 verified candidates in that category.
 
+The third checklist, `windows-temp`, covers the per-user Temp directory and the
+Temporary Internet Files cache. Each is one candidate whose contents go
+regardless of age while the folder stays. Removal is in
+[`temporary-contents.ts`](../../src/core/filesystem/temporary-contents.ts): it
+removes links without following them, and reports locked or inaccessible
+entries through `onSkipped` while siblings continue. Skips reach the summary and
+the audit log's `entry-skipped` records. A `TEMP` outside the user profile, or
+one that contains the profile, is not offered.
+
 Unattended runs need explicit `--category` names, and destructive caches run
-only when `destructive-cache` is named. Sign-in runs only general cache
+only when `destructive-cache` is named. Windows temporary directories run only
+when `windows-temp` is named. Sign-in runs only general cache
 cleanup. Saved selections in other categories are excluded and recorded in the
 audit log. Driver Store removal requires a manual run and elevation.
