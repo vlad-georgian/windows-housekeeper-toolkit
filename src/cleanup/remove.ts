@@ -46,7 +46,13 @@ export async function runCleanup(
                     if (!signIn) p.log.warn(`Skipped ${cleaner.label} because it is running.`)
                     continue
                 }
+                let skippedHere = 0
                 const removal = await cleaner.remove(candidate, {
+                    onSkipped: async (entry) => {
+                        skippedHere += 1
+                        summary.skippedEntries += 1
+                        await audit.recordSkippedEntry(cleaner.id, cleaner.label, candidate, entry)
+                    },
                     onRemoved: async (entry) => {
                         summary.removedEntries += 1
                         summary.cleanedApps.add(cleaner.label)
@@ -62,6 +68,9 @@ export async function runCleanup(
                 if (!signIn && removal.removedEntries > 0) {
                     const size = candidate.sizeBytes === null ? 'size reported by Windows' : formatBytes(removal.reclaimedBytes)
                     p.log.success(`Removed ${candidate.displayName} (${size})\n  ${location}`)
+                }
+                if (!signIn && skippedHere > 0) {
+                    p.log.warn(`Skipped ${skippedHere} locked or inaccessible entries in ${candidate.displayName}. The audit log lists each one.`)
                 }
             } catch (error) {
                 summary.failures += 1

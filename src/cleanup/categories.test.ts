@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { createCleaners } from '../cleaners/index.ts'
 import type { AppCleaner } from '../core/types.ts'
 import { createSandbox, type Sandbox } from '../test-support/fixtures.ts'
-import { cleanersForCategories, resolveSignInCleaners } from './categories.ts'
+import { categoriesForOperation, cleanersForCategories, resolveSignInCleaners } from './categories.ts'
 
 let sandbox: Sandbox
 let catalog: readonly AppCleaner[]
@@ -67,5 +67,22 @@ describe('cleaner catalog', () => {
                 .toSorted()
             expect(categories).toEqual(['general-cache', 'old-installations'])
         }
+    })
+})
+
+describe('Windows temporary directories category', () => {
+    test('selects only the per-user temporary cleaners when named', () => {
+        const temporary = cleanersForCategories(catalog, ['windows-temp'])
+        expect(temporary.map((cleaner) => cleaner.id)).toEqual(['user-temp', 'internet-cache'])
+    })
+
+    test('is never run by sign-in cleanup, even when saved', () => {
+        const { cleaners, excluded } = resolveSignInCleaners(catalog, ['user-temp', 'internet-cache', 'codex'])
+        expect(cleaners.map((cleaner) => cleaner.id)).toEqual(['codex'])
+        expect(excluded).toEqual(['user-temp', 'internet-cache'])
+    })
+
+    test('follows destructive cache cleanup in the cache operation', () => {
+        expect(categoriesForOperation('caches').map((category) => category.id)).toEqual(['general-cache', 'destructive-cache', 'windows-temp'])
     })
 })

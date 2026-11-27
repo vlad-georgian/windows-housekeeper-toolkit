@@ -9,7 +9,7 @@
     "type": "module",
     "scripts": {
         "start": "bun run src/index.ts",
-        "scan": "bun run src/index.ts --dry-run --category general-cache --category destructive-cache --category old-installations",
+        "scan": "bun run src/index.ts --dry-run --category general-cache --category destructive-cache --category windows-temp --category old-installations",
         "test": "bun test",
         "typecheck": "vp check --no-fmt --no-lint",
         "lint": "vp lint",

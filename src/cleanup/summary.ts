@@ -7,6 +7,8 @@ export interface CleanupSummary {
     /** Known bytes of the targets a dry run would remove. */
     detectedBytes: number
     removedEntries: number
+    /** Entries left in place because they were locked or inaccessible. */
+    skippedEntries: number
     cleanedApps: Set<string>
     skippedApps: Set<string>
     failedApps: Set<string>
@@ -20,6 +22,7 @@ export function newSummary(): CleanupSummary {
         reclaimedBytes: 0,
         detectedBytes: 0,
         removedEntries: 0,
+        skippedEntries: 0,
         cleanedApps: new Set(),
         skippedApps: new Set(),
         failedApps: new Set(),
@@ -46,6 +49,7 @@ export function describeSummary(summary: CleanupSummary, dryRun: boolean, auditP
         ? `${formatBytes(summary.detectedBytes)} detected. Nothing was removed.`
         : `${formatBytes(summary.reclaimedBytes)} reclaimed across ${summary.removedEntries} entries.`
     const drives = [...summary.bytesByDrive].map(([drive, size]) => `${drive} ${formatBytes(size)}`)
-    const skipped = summary.skippedApps.size ? [`Skipped running apps: ${[...summary.skippedApps].join(', ')}.`] : []
-    return [result, ...drives, ...skipped, `${summary.failures} failure(s).`, `Detailed log: ${auditPath}`]
+    const skippedApps = summary.skippedApps.size ? [`Skipped running apps: ${[...summary.skippedApps].join(', ')}.`] : []
+    const skippedEntries = summary.skippedEntries ? [`${summary.skippedEntries} locked or inaccessible entries skipped.`] : []
+    return [result, ...drives, ...skippedApps, ...skippedEntries, `${summary.failures} failure(s).`, `Detailed log: ${auditPath}`]
 }
