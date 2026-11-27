@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 import { AuditLogger } from '../core/audit-logger.ts'
 import type { AppCleaner, CleanupCandidate, CleanupCategoryId } from '../core/types.ts'
 import { cancelled, type LaunchOperation, type PlanSection } from '../launch/types.ts'
 import { FakePrompts } from '../test-support/fake-prompts.ts'
 import { createSandbox, type Sandbox } from '../test-support/fixtures.ts'
-import { type CleanupSession, createCleanupOperations } from './operations.ts'
-import { newSummary } from './summary.ts'
+import { type CleanupSession, createCleanupOperations, runUnattendedCleanup } from './operations.ts'
+import { describeSummary, newSummary } from './summary.ts'
 
 const removed: string[] = []
 
@@ -130,5 +132,49 @@ describe('old-installation cleanup operation', () => {
         expect(prompts.checklists).toHaveLength(1)
         expect(prompts.checklists[0]?.initialValues).toEqual([])
         expect(section.lines).toEqual(['Old data and installations', '  App discord-versions: 1 target(s), 4.0 KiB'])
+    })
+})
+
+describe('cache cleanup operation with Windows temporary directories', () => {
+    const withTemp = [...catalog, fakeCleaner('user-temp', 'windows-temp', [8192], 'Files in use are skipped.')]
+
+    test('presents the temporary directories as the third checklist, unchecked', async () => {
+        const operations = createCleanupOperations(withTemp, session)
+        const operation = required(operations.find((entry) => entry.id === 'caches'))
+        const prompts = new FakePrompts([[], [], ['user-temp']])
+
+        const section = planned(await operation.gather(prompts))
+
+        expect(prompts.checklists.map((request) => request.options.map((o) => o.value))).toEqual([['codex'], ['npm'], ['user-temp']])
+        for (const request of prompts.checklists) expect(request.initialValues).toEqual([])
+        expect(section.lines).toEqual(['Per-user Windows temporary directories', '  App user-temp: 1 target(s), 8.0 KiB. Files in use are skipped.'])
+    })
+
+    test('cancelling the temporary directories checklist cancels the operation', async () => {
+        const operations = createCleanupOperations(withTemp, session)
+        const operation = required(operations.find((entry) => entry.id === 'caches'))
+        expect(await operation.gather(new FakePrompts([['codex'], ['npm'], null]))).toBe(cancelled)
+    })
+})
+
+describe('skipped entries', () => {
+    test('counts entries a cleaner leaves in place and records each in the audit log', async () => {
+        await startSession(false)
+        const cleaner: AppCleaner = {
+            ...fakeCleaner('user-temp', 'windows-temp', [10]),
+            remove: async (_candidate, callbacks) => {
+                await callbacks.onSkipped?.({ path: join(sandbox.root, 'locked.tmp'), reason: 'EBUSY: resource busy or locked' })
+                return { removedEntries: 0, reclaimedBytes: 0 }
+            }
+        }
+
+        await runUnattendedCleanup([cleaner], session)
+
+        expect(session.summary.skippedEntries).toBe(1)
+        expect(session.summary.failures).toBe(0)
+        const log = await readFile(session.audit.path, 'utf8')
+        expect(log).toContain('"entry-skipped"')
+        expect(log).toContain('locked.tmp')
+        expect(describeSummary(session.summary, false, session.audit.path)).toContain('1 locked or inaccessible entries skipped.')
     })
 })

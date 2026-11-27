@@ -31,6 +31,13 @@ export const cleanupCategories: readonly CleanupCategory[] = [
         signIn: false
     },
     {
+        id: 'windows-temp',
+        operation: 'caches',
+        label: 'Per-user Windows temporary directories',
+        checklistMessage: 'Which per-user temporary locations should be emptied? Files that are in use are skipped.',
+        signIn: false
+    },
+    {
         id: 'old-installations',
         operation: 'old-installations',
         label: 'Old data and installations',

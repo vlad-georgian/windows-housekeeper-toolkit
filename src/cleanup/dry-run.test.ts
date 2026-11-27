@@ -82,6 +82,19 @@ describe('dry run per cleanup category', () => {
         for (const path of [npm, npx, scoop]) expect(await pathExists(path)).toBe(true)
     })
 
+    test('Windows temporary directory cleanup previews per-user contents without removing them', async () => {
+        const temp = await sandbox.file(join(local, 'Temp', 'installer', 'setup.tmp'), 'abc')
+        const internet = await sandbox.file(join(local, 'Microsoft', 'Windows', 'INetCache', 'IE', 'page.htm'), 'de')
+        const machineWide = await sandbox.file(join('Windows', 'Temp', 'machine.tmp'))
+        const { session, removedTargets, log } = await dryRun('windows-temp')
+        expect([...session.selectedCleaners].toSorted()).toEqual(['internet-cache', 'user-temp'])
+        expect(session.summary.detectedBytes).toBe(5)
+        expect(removedTargets).toEqual([])
+        expect(log).toContain('"dry-run-skip"')
+        expect(log).not.toContain('machine.tmp')
+        for (const path of [temp, internet, machineWide]) expect(await pathExists(path)).toBe(true)
+    })
+
     test('old-installation cleanup previews superseded releases without removing them', async () => {
         const app = join(local, 'GitHubDesktop')
         await sandbox.file(join(app, 'Update.exe'))

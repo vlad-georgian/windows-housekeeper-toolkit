@@ -18,3 +18,9 @@ describe('cleanup CLI options', () => {
         expect(options.categories).toEqual(['old-installations'])
     })
 })
+
+describe('Windows temporary directories category', () => {
+    test('is selected only when named for an unattended run', () => {
+        expect(parseCliOptions(['--category', 'windows-temp']).categories).toEqual(['windows-temp'])
+    })
+})

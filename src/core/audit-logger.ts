@@ -2,7 +2,7 @@ import { appendFile, mkdir } from 'node:fs/promises'
 import { parse, resolve } from 'node:path'
 
 import { projectName } from './state.ts'
-import type { CleanupCandidate, RemovedEntry } from './types.ts'
+import type { CleanupCandidate, RemovedEntry, SkippedEntry } from './types.ts'
 
 type AuditDetails = Record<string, unknown>
 
@@ -96,6 +96,17 @@ export class AuditLogger {
 
     async recordSkip(appId: string, reason: string): Promise<void> {
         await this.write('app-skipped', { appId, reason })
+    }
+
+    async recordSkippedEntry(appId: string, appLabel: string, candidate: CleanupCandidate, entry: SkippedEntry): Promise<void> {
+        await this.write('entry-skipped', {
+            appId,
+            appLabel,
+            candidateId: candidate.id,
+            candidate: candidate.displayName,
+            path: entry.path,
+            reason: entry.reason
+        })
     }
 
     async recordStartupEnforcement(messages: readonly string[], failures: number): Promise<void> {

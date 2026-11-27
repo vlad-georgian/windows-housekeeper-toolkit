@@ -56,7 +56,7 @@ export interface DetectionResult {
  * Cleanup categories, in checklist order. Each cleaner belongs to exactly one category.
  * Classify a cleaner by what its underlying data is, not by the app it belongs to.
  */
-export const cleanupCategoryIds = ['general-cache', 'destructive-cache', 'old-installations'] as const
+export const cleanupCategoryIds = ['general-cache', 'destructive-cache', 'windows-temp', 'old-installations'] as const
 
 export type CleanupCategoryId = (typeof cleanupCategoryIds)[number]
 
