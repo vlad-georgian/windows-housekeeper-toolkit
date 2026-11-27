@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
-import { link, readFile, symlink } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { createCleaners } from '../cleaners/index.ts'
@@ -11,6 +11,7 @@ import { pathExists } from '../core/filesystem/index.ts'
 import type { AppCleaner, CleanupCategoryId } from '../core/types.ts'
 import { addCodexRelease, codexStorePath, selectCodexRelease } from '../test-support/codex-fixtures.ts'
 import { createSandbox, type Sandbox } from '../test-support/fixtures.ts'
+import { addVitePlusRelease, selectVitePlusRelease, vitePlusSplitData } from '../test-support/vite-plus-fixtures.ts'
 import type { WindowsProcess } from '../windows/processes.ts'
 import { cleanersForCategories } from './categories.ts'
 import { type CleanupSession, runUnattendedCleanup } from './operations.ts'
@@ -150,18 +151,11 @@ describe('dry run per cleanup category', () => {
     })
 
     test('old-installation cleanup previews obsolete Vite+, Claude Code, and VS Code data and preserves the rest', async () => {
-        // Releases are pnpm installs in the split data directory: a junction into the virtual store and a hardlink from the store.
-        const vp = join(local, 'vite-plus', 'data')
-        const store = await sandbox.file(join(home, 'pnpm-store', 'content'), 'shared')
-        for (const version of ['0.1.0', '0.2.0', '0.3.0', '0.4.0']) {
-            await sandbox.file(join(vp, version, 'package.json'), JSON.stringify({ version }))
-            const virtual = join(vp, version, 'node_modules', '.pnpm', 'vite-plus', 'node_modules', 'vite-plus')
-            await sandbox.directory(virtual)
-            await link(store, join(sandbox.root, virtual, 'index.js'))
-            await symlink(join(sandbox.root, virtual), join(sandbox.root, vp, version, 'node_modules', 'vite-plus'), 'junction')
-        }
-        await symlink(join(sandbox.root, vp, '0.3.0'), join(sandbox.root, vp, 'current'), 'junction')
-        await sandbox.file(join(vp, '.previous-version'), '0.2.0')
+        // Releases are pnpm installs in the split data directory, and Vite+ 1.7 or later keeps an installation lock there.
+        for (const version of ['1.7.0', '1.8.0', '1.9.0', '1.10.0']) await addVitePlusRelease(sandbox, version, vitePlusSplitData)
+        await selectVitePlusRelease(sandbox, '1.9.0', vitePlusSplitData)
+        await sandbox.file(join(vitePlusSplitData, '.previous-version'), '1.8.0')
+        await sandbox.file(join(vitePlusSplitData, '.install.lock'), '')
 
         const claude = join(home, '.local', 'share', 'claude', 'versions')
         for (const version of ['2.1.325', '2.1.326', '2.1.327']) await sandbox.file(join(claude, version))
@@ -175,9 +169,9 @@ describe('dry run per cleanup category', () => {
         const { session, log, removedTargets } = await dryRun('old-installations')
         const previewed = [...log.matchAll(/"candidate":"([^"]+)"/g)].map((match) => match[1] ?? '').toSorted()
         expect([...session.selectedCleaners].toSorted()).toEqual(['claude-code-versions', 'vite-plus-releases', 'vscode-extensions'])
-        expect(previewed).toEqual(['Claude Code 2.1.325', 'VS Code extension a.old-1.0.0', 'Vite+ 0.1.0'])
+        expect(previewed).toEqual(['Claude Code 2.1.325', 'VS Code extension a.old-1.0.0', 'Vite+ 1.7.0'])
         expect(removedTargets).toEqual([])
-        for (const path of [join(vp, '0.1.0'), join(claude, '2.1.325'), join(extensions, 'a.old-1.0.0')]) {
+        for (const path of [join(vitePlusSplitData, '1.7.0'), join(claude, '2.1.325'), join(extensions, 'a.old-1.0.0')]) {
             expect(await pathExists(join(sandbox.root, path))).toBe(true)
         }
     })

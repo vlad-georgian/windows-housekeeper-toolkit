@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
 
 import { createSandbox, type Sandbox } from '../../test-support/fixtures.ts'
-import { isInstallLockHeld } from './vite-plus-install-lock.ts'
+import { acquireInstallLock } from './vite-plus-install-lock.ts'
 
 let sandbox: Sandbox
 
@@ -11,38 +11,67 @@ beforeEach(async () => {
 })
 afterEach(() => sandbox.dispose())
 
-describe('Vite+ install lock probe', () => {
-    test('reports no lock when the lock file is absent or free', async () => {
-        const path = join(sandbox.root, '.install.lock')
-        expect(await isInstallLockHeld(path)).toBe(false)
+/** A PowerShell child that tries to take, or holds, an exclusive byte-range lock as Vite+ does. */
+function powershell(script: string, path: string) {
+    return Bun.spawn(['powershell', '-NoProfile', '-NonInteractive', '-Command', script], {
+        stdout: 'pipe',
+        stderr: 'ignore',
+        windowsHide: true,
+        env: { ...process.env, LOCK_PATH: path }
+    })
+}
 
-        await sandbox.file('.install.lock', '')
-        expect(await isInstallLockHeld(path)).toBe(false)
+async function firstLine(child: ReturnType<typeof powershell>): Promise<string> {
+    const reader = child.stdout.getReader()
+    const first = await reader.read()
+    return new TextDecoder().decode(first.value).trim()
+}
+
+const open = `$fs = [IO.File]::Open($env:LOCK_PATH, 'Open', 'ReadWrite', 'ReadWrite')`
+
+describe('Vite+ install lock', () => {
+    test('never creates the lock file, so a missing lock cannot be acquired', async () => {
+        const path = join(sandbox.root, '.install.lock')
+        expect(await acquireInstallLock(path)).toBeNull()
     })
 
-    test('reports a lock held by another process, as Vite+ takes it with an exclusive byte-range lock', async () => {
+    test('is exclusive: a second acquisition fails until the first is released', async () => {
         const path = await sandbox.file('.install.lock', '')
-        // Holds the same kind of exclusive lock that Vite+ takes while it changes releases.
-        const holder = Bun.spawn(
-            [
-                'powershell',
-                '-NoProfile',
-                '-NonInteractive',
-                '-Command',
-                `$fs = [IO.File]::Open($env:LOCK_PATH, 'Open', 'ReadWrite', 'ReadWrite'); $fs.Lock(0, [long]::MaxValue); Write-Output locked; Start-Sleep 30`
-            ],
-            { stdout: 'pipe', stderr: 'ignore', windowsHide: true, env: { ...process.env, LOCK_PATH: path } }
-        )
-        try {
-            const reader = holder.stdout.getReader()
-            const first = await reader.read()
-            expect(new TextDecoder().decode(first.value)).toContain('locked')
+        const release = await acquireInstallLock(path)
+        expect(release).not.toBeNull()
+        expect(await acquireInstallLock(path)).toBeNull()
 
-            expect(await isInstallLockHeld(path)).toBe(true)
+        release?.()
+        const again = await acquireInstallLock(path)
+        expect(again).not.toBeNull()
+        again?.()
+    })
+
+    test('keeps another process from taking the lock Vite+ takes while it is held', async () => {
+        const path = await sandbox.file('.install.lock', '')
+        const release = await acquireInstallLock(path)
+        const contender = powershell(`${open}; try { $fs.Lock(0, [long]::MaxValue); 'acquired' } catch { 'blocked' }`, path)
+        try {
+            expect(await firstLine(contender)).toBe('blocked')
+        } finally {
+            release?.()
+            contender.kill()
+            await contender.exited
+        }
+    })
+
+    test('cannot be acquired while another process holds it', async () => {
+        const path = await sandbox.file('.install.lock', '')
+        const holder = powershell(`${open}; $fs.Lock(0, [long]::MaxValue); 'locked'; Start-Sleep 30`, path)
+        try {
+            expect(await firstLine(holder)).toBe('locked')
+            expect(await acquireInstallLock(path)).toBeNull()
         } finally {
             holder.kill()
             await holder.exited
         }
-        expect(await isInstallLockHeld(path)).toBe(false)
+        const release = await acquireInstallLock(path)
+        expect(release).not.toBeNull()
+        release?.()
     })
 })
