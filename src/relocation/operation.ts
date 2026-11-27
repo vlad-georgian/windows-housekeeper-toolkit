@@ -41,11 +41,19 @@ interface AppAction {
     readonly transfers: readonly PathTransfer[]
 }
 
+/** An app's planned action and its plan lines, or why it is held back. */
+type AppPlan = { readonly action: AppAction; readonly lines: readonly string[] } | { readonly blocked: string }
+
 const title = 'Move apps to another drive'
 
-async function describeSize(path: string): Promise<string> {
-    const { bytes } = await measureTree(path)
-    return formatBytes(bytes)
+/** A tree's size for the plan, or why it cannot be relocated yet. */
+async function sizeOf(path: string): Promise<{ size: string } | { blocked: string }> {
+    try {
+        return { size: formatBytes((await measureTree(path)).bytes) }
+    } catch (error) {
+        if (error instanceof UnsupportedTreeError) return { blocked: error.message.replace(/\.$/u, '') }
+        throw error
+    }
 }
 
 async function checklistHint(inspection: AppInspection): Promise<string> {
@@ -80,7 +88,7 @@ async function askForBase(prompts: LaunchPrompts, options: RelocationOptions, or
 }
 
 /** Plans a move, or returns why the app cannot move. Nothing changes on disk. */
-async function planMove(inspection: AppInspection, base: string, home: string): Promise<{ action: AppAction; lines: string[] } | { blocked: string }> {
+async function planMove(inspection: AppInspection, base: string, home: string): Promise<AppPlan> {
     const lines = [`Move ${inspection.app.label} to another drive`]
     const transfers: PathTransfer[] = []
     for (const step of moveSteps(inspection, base, home)) {
@@ -90,23 +98,23 @@ async function planMove(inspection: AppInspection, base: string, home: string): 
             continue
         }
         if (await pathExists(step.destination)) return { blocked: `${step.destination} already exists. Move or remove it before relocating ${inspection.app.label}` }
-        try {
-            lines.push(`  ${step.path} → ${step.destination} (${await describeSize(step.path)})`)
-        } catch (error) {
-            if (error instanceof UnsupportedTreeError) return { blocked: error.message }
-            throw error
-        }
+        const size = await sizeOf(step.path)
+        if ('blocked' in size) return size
+        lines.push(`  ${step.path} → ${step.destination} (${size.size})`)
         transfers.push({ original: step.path, destination: step.destination })
     }
     return { action: { app: inspection.app, action: 'move', base, transfers }, lines }
 }
 
-async function planRestore(inspection: AppInspection, base: string): Promise<{ action: AppAction; lines: string[] }> {
+/** Plans a restore, or returns why the app cannot be restored. Nothing changes on disk. */
+async function planRestore(inspection: AppInspection, base: string): Promise<AppPlan> {
     const lines = [`Restore ${inspection.app.label} to its original paths`]
     const transfers: PathTransfer[] = []
     for (const entry of inspection.applicable) {
-        if (entry.state.kind !== 'linked') throw new Error(`${entry.path} is not linked.`)
-        lines.push(`  ${entry.state.target} → ${entry.path} (${await describeSize(entry.state.target)})`)
+        if (entry.state.kind !== 'linked') return { blocked: `${entry.path} is not linked` }
+        const size = await sizeOf(entry.state.target)
+        if ('blocked' in size) return size
+        lines.push(`  ${entry.state.target} → ${entry.path} (${size.size})`)
         transfers.push({ original: entry.path, destination: entry.state.target })
     }
     return { action: { app: inspection.app, action: 'restore', base, transfers }, lines }
@@ -198,6 +206,10 @@ export function createRelocationOperation(options: RelocationOptions): LaunchOpe
             }
             for (const inspection of toRestore) {
                 const plan = await planRestore(inspection, inspection.migratedBase ?? '')
+                if ('blocked' in plan) {
+                    prompts.log(`${inspection.app.label} cannot be restored: ${plan.blocked}.`)
+                    continue
+                }
                 actions.push(plan.action)
                 lines.push(...plan.lines)
             }

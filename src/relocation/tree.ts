@@ -35,9 +35,9 @@ async function walk(root: string, visit: (entry: Omit<TreeEntry, 'sha256'>, abso
         const path = relative ? join(relative, name) : name
         const absolute = join(root, path)
         const stats = await lstat(absolute, { bigint: true })
-        if (stats.isSymbolicLink()) throw new UnsupportedTreeError(`${absolute} is a link. Moving trees that contain links is not supported yet.`)
+        if (stats.isSymbolicLink()) throw new UnsupportedTreeError(`${absolute} is a link. Relocating directories that contain links is not supported yet.`)
         if (stats.isFile()) {
-            if (stats.nlink !== 1n) throw new UnsupportedTreeError(`${absolute} is hard-linked. Moving hard-linked files is not supported yet.`)
+            if (stats.nlink !== 1n) throw new UnsupportedTreeError(`${absolute} is hard-linked. Relocating hard-linked files is not supported yet.`)
             await visit({ path, kind: 'file', bytes: Number(stats.size), readOnly: (stats.mode & 0o200n) === 0n }, absolute)
         } else if (stats.isDirectory()) {
             await visit({ path, kind: 'directory', bytes: 0, readOnly: false }, absolute)

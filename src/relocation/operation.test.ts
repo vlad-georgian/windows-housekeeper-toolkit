@@ -209,6 +209,16 @@ describe('restoring moved apps', () => {
         expect(events).toMatchObject([{ kind: 'restored' }, { kind: 'restored' }])
     })
 
+    test('reports a moved app that cannot be restored without changing it', async () => {
+        await moveApps(['vscode-extensions'])
+        await symlink(await sandbox.directory('Elsewhere'), join(extensions(), 'linked'), 'junction')
+        const prompts = new FakePrompts([[]])
+
+        expect(await operation().gather(prompts)).toBeNull()
+        expect(prompts.logs.some((message) => message.includes('cannot be restored') && message.includes('is a link'))).toBe(true)
+        expect(await isLinkTo(extensions(), mirrored(extensions()))).toBe(true)
+    })
+
     test('holds back an app with an interrupted transfer and points to its recovery information', async () => {
         await journal.save({
             id: '00000000-0000-4000-8000-000000000000',
