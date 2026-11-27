@@ -60,10 +60,11 @@ uses the same SCM handle to change the startup mode.
 
 `app-service-startup.json` lives in the administrator profile's toolkit state.
 A machine-wide toolkit lock covers verification, saving the original mode, and
-each confirmed change. The provider retains the saved mode through an interrupted
-change and can resume a restore between the separate automatic and delayed-start
-updates. An identity mismatch blocks restore and leaves the saved record in
-place.
+each confirmed change. A confirmed pre-write rejection during disable removes
+the record created by that attempt, allowing a newly verified installation to
+be selected. An uncertain outcome retains the saved mode. A restore can resume
+between the separate automatic and delayed-start updates. An identity mismatch
+blocks restore and leaves the saved record in place.
 
 Windows references for [packaged service declarations](https://learn.microsoft.com/en-us/uwp/schemas/appxpackage/uapmanifestschema/element-desktop6-service), [service configuration](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-changeserviceconfigw), and [delayed automatic start](https://learn.microsoft.com/en-us/windows/desktop/api/winsvc/ns-winsvc-service_delayed_auto_start_info).
 

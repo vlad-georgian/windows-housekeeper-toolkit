@@ -1,7 +1,7 @@
 import { withServiceStartupLock } from '../core/state.ts'
 import type { SystemPaths } from '../core/system-paths.ts'
 import { appNames } from '../windows/app-catalog.ts'
-import { isAutomatic, sameService, type AppService, type ServiceBackend } from '../windows/app-services/backend.ts'
+import { isAutomatic, sameService, ServiceChangeRejectedError, type AppService, type ServiceBackend } from '../windows/app-services/backend.ts'
 import { readServicePreferences, saveServicePreferences, type ServicePreference } from '../windows/app-services/preferences.ts'
 import type { StartupChoice, StartupProvider } from './types.ts'
 
@@ -53,7 +53,13 @@ export function createServiceStartupProvider(paths: SystemPaths, backend: Servic
                             const latest = await readServicePreferences(paths)
                             if (latest.some((preference) => preference.service.name === service.name)) throw new Error(`${service.name} already has a saved preference.`)
                             await saveServicePreferences(paths, [...latest, saved])
-                            await backend.changeMode(service, 'Manual')
+                            try {
+                                await backend.changeMode(service, 'Manual')
+                            } catch (error) {
+                                // Only a confirmed pre-write rejection can undo this attempt's saved record.
+                                if (error instanceof ServiceChangeRejectedError) await saveServicePreferences(paths, latest)
+                                throw error
+                            }
                             return `Changed ${service.name} from ${service.mode} to Manual and saved its prior startup mode.`
                         })
                     )

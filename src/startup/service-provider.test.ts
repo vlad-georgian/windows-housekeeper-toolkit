@@ -5,7 +5,7 @@ import { AuditLogger } from '../core/audit-logger.ts'
 import { runLaunchMenu } from '../launch/menu.ts'
 import { FakePrompts } from '../test-support/fake-prompts.ts'
 import { createSandbox, type Sandbox } from '../test-support/fixtures.ts'
-import type { AppService, ServiceBackend, ServiceStartupMode } from '../windows/app-services/backend.ts'
+import { ServiceChangeRejectedError, type AppService, type ServiceBackend, type ServiceStartupMode } from '../windows/app-services/backend.ts'
 import { createStartupOperation } from './operation.ts'
 import { createServiceStartupProvider } from './service-provider.ts'
 
@@ -34,6 +34,8 @@ class FakeServices implements ServiceBackend {
     other: AppService = codex
     elevated = true
     interruptDelayedRestore = false
+    replaceBeforeChange: typeof this.service = null
+    loseDisableReply = false
     warnings: string[] = []
 
     inspect() {
@@ -46,6 +48,10 @@ class FakeServices implements ServiceBackend {
     }
 
     changeMode(expected: AppService, mode: ServiceStartupMode): Promise<void> {
+        if (this.replaceBeforeChange) {
+            this.service = this.replaceBeforeChange
+            this.replaceBeforeChange = null
+        }
         const current = this.service
         if (
             !this.elevated ||
@@ -56,13 +62,14 @@ class FakeServices implements ServiceBackend {
             current.binaryHash !== expected.binaryHash ||
             current.mode !== expected.mode
         ) {
-            return Promise.reject(new Error('The service changed.'))
+            return Promise.reject(new ServiceChangeRejectedError('The service changed.'))
         }
         if (this.interruptDelayedRestore && mode === 'Automatic (Delayed Start)') {
             this.service = { ...current, mode: 'Automatic' }
             return Promise.reject(new Error('The delayed start flag could not be set.'))
         }
         this.service = { ...current, mode }
+        if (this.loseDisableReply && mode === 'Manual') return Promise.reject(new Error('Lost the service configuration response.'))
         return Promise.resolve()
     }
 }
@@ -165,6 +172,48 @@ test('refuses to change an executable replaced after confirmation was presented'
     const next = new FakePrompts([['startup'], []])
     await menu(machine, next)
     expect(next.checklists[1]?.options.map((option) => option.value)).toContain(disable)
+})
+
+test('retries disable for an updated service after the backend confirms it rejected the previous change before writing', async () => {
+    const machine = new FakeServices()
+    machine.other = { ...codex, mode: 'Manual' }
+    const updated = {
+        ...claude,
+        packageFullName: 'Claude_2.0.0.0_x64__pzs8sxrjxfjjc',
+        imagePath: claude.imagePath.replace('1.0.0.0', '2.0.0.0'),
+        binaryHash: 'c'.repeat(64),
+        mode: 'Automatic (Delayed Start)' as const,
+        running: true
+    }
+    machine.replaceBeforeChange = updated
+
+    expect((await menu(machine, new FakePrompts([['startup'], [disable], true]))).failures).toBe(1)
+    expect(machine.service).toEqual(updated)
+
+    expect(await menu(machine, new FakePrompts([['startup'], [disable], true]))).toEqual({ outcome: 'applied', failures: 0 })
+    expect(machine.service).toEqual({ ...updated, mode: 'Manual' })
+    expect(await menu(machine, new FakePrompts([['startup'], [restore], true]))).toEqual({ outcome: 'applied', failures: 0 })
+    expect(machine.service).toEqual(updated)
+})
+
+test('keeps the original mode when disable may have completed and retries restore after a confirmed pre-write rejection', async () => {
+    const machine = new FakeServices()
+    machine.other = { ...codex, mode: 'Manual' }
+    machine.loseDisableReply = true
+    const original = { ...claude, mode: 'Automatic (Delayed Start)' as const, running: true }
+    machine.service = original
+
+    expect((await menu(machine, new FakePrompts([['startup'], [disable], true]))).failures).toBe(1)
+    const manual = { ...original, mode: 'Manual' as const }
+    expect(machine.service).toEqual(manual)
+
+    machine.replaceBeforeChange = { ...manual, binaryHash: 'c'.repeat(64) }
+    expect((await menu(machine, new FakePrompts([['startup'], [restore], true]))).failures).toBe(1)
+    expect(machine.service).toEqual({ ...manual, binaryHash: 'c'.repeat(64) })
+
+    machine.service = manual
+    expect(await menu(machine, new FakePrompts([['startup'], [restore], true]))).toEqual({ outcome: 'applied', failures: 0 })
+    expect(machine.service).toEqual(original)
 })
 
 test('refuses to restore after the service identity changes and keeps the saved preference', async () => {

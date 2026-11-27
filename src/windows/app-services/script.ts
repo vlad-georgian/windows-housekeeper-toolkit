@@ -70,36 +70,45 @@ ${serviceConfigInterop}
 
     if ($data.expected) {
       $expected = $data.expected
-      $identity = $data.identities | Where-Object { $_.id -ceq $expected.app -and $_.name -ceq $expected.name }
-      if (-not $identity) { throw 'This service is outside the app service startup catalog.' }
-      $handle = [Housekeeper.ServiceConfig]::Open($identity.name)
-      if ($null -eq $handle) { throw 'The service is no longer registered.' }
+      $handle = $null
       try {
-        $service = Get-VerifiedService $identity $handle
-        if ($service.packageFullName -cne $expected.packageFullName -or $service.imagePath -cne $expected.imagePath -or
-            $service.binaryHash -cne $expected.binaryHash -or $service.mode -cne $expected.mode) {
-          throw 'The service identity or startup mode changed since the plan was shown.'
+        try {
+          $identity = $data.identities | Where-Object { $_.id -ceq $expected.app -and $_.name -ceq $expected.name }
+          if (-not $identity) { throw 'This service is outside the app service startup catalog.' }
+          $handle = [Housekeeper.ServiceConfig]::Open($identity.name)
+          if ($null -eq $handle) { throw 'The service is no longer registered.' }
+          $service = Get-VerifiedService $identity $handle
+          if ($service.packageFullName -cne $expected.packageFullName -or $service.imagePath -cne $expected.imagePath -or
+              $service.binaryHash -cne $expected.binaryHash -or $service.mode -cne $expected.mode) {
+            throw 'The service identity or startup mode changed since the plan was shown.'
+          }
+          $config = [Housekeeper.ServiceConfig]::Read($handle)
+          Assert-SameConfig $config $expected
+          if ((Get-StartupMode $handle $config) -ne $expected.mode) { throw 'The startup mode changed during verification.' }
+          $turnOff = $data.mode -eq 'Manual' -and $config.Start -eq 2
+          $restore = $data.mode -in @('Automatic', 'Automatic (Delayed Start)') -and $config.Start -in @(2, 3)
+          if (-not ($turnOff -or $restore)) { throw 'Unsupported service startup change.' }
+        } catch {
+          @{ rejectedBeforeWrite = $_.Exception.Message } | ConvertTo-Json -Compress
+          return
         }
-        $config = [Housekeeper.ServiceConfig]::Read($handle)
-        Assert-SameConfig $config $expected
-        if ((Get-StartupMode $handle $config) -ne $expected.mode) { throw 'The startup mode changed during verification.' }
 
-        if ($data.mode -eq 'Manual' -and $config.Start -eq 2) {
+        if ($turnOff) {
           [Housekeeper.ServiceConfig]::SetStart($handle, 3)
-        } elseif ($data.mode -in @('Automatic', 'Automatic (Delayed Start)') -and $config.Start -in @(2, 3)) {
+        } else {
           if ($config.Start -eq 3) { [Housekeeper.ServiceConfig]::SetStart($handle, 2) }
           $delayed = $data.mode -eq 'Automatic (Delayed Start)'
           $config = [Housekeeper.ServiceConfig]::Read($handle)
           Assert-SameConfig $config $expected
           if ($config.Start -ne 2) { throw 'The startup mode changed during restore.' }
           if ([Housekeeper.ServiceConfig]::IsDelayed($handle) -ne $delayed) { [Housekeeper.ServiceConfig]::SetDelayed($handle, $delayed) }
-        } else { throw 'Unsupported service startup change.' }
+        }
 
         $result = [Housekeeper.ServiceConfig]::Read($handle)
         Assert-SameConfig $result $expected
         if ((Get-StartupMode $handle $result) -cne $data.mode) { throw 'Could not verify the new service startup mode.' }
         'verified'
-      } finally { $handle.Dispose() }
+      } finally { if ($null -ne $handle) { $handle.Dispose() } }
       return
     }
 

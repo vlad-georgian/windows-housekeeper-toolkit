@@ -20,9 +20,12 @@ export interface ServiceSnapshot {
     readonly warnings: readonly string[]
 }
 
+/** The backend confirmed that it rejected the request before attempting an SCM mutation. */
+export class ServiceChangeRejectedError extends Error {}
+
 export interface ServiceBackend {
     inspect(): Promise<ServiceSnapshot>
-    /** Rechecks elevation, ownership, identity and the expected mode before changing only the startup configuration. */
+    /** Rechecks eligibility before changing startup configuration. Only a confirmed pre-write rejection uses ServiceChangeRejectedError. */
     changeMode(expected: AppService, mode: Exclude<ServiceStartupMode, 'Disabled'>): Promise<void>
 }
 
@@ -60,6 +63,10 @@ function isServiceSnapshot(value: unknown): value is ServiceSnapshot {
     return isRecord(value) && typeof value.elevated === 'boolean' && isArrayOf(value.services, isAppService) && isArrayOf(value.warnings, isString)
 }
 
+function isPreWriteRejection(value: unknown): value is { rejectedBeforeWrite: string } {
+    return isRecord(value) && typeof value.rejectedBeforeWrite === 'string' && value.rejectedBeforeWrite.length > 0
+}
+
 export function createSystemServiceBackend(): ServiceBackend {
     const identities = appServiceIdentities.map(({ id, name, file, signer }) => ({
         id,
@@ -74,7 +81,9 @@ export function createSystemServiceBackend(): ServiceBackend {
         },
         async changeMode(expected, mode) {
             const output = await runPowerShell(appServiceScript, { identities, expected, mode }, 30_000)
-            if (output !== 'verified') throw new Error('Could not verify the service startup mode change.')
+            if (output === 'verified') return
+            const { rejectedBeforeWrite } = parseInventoryResult(output, isPreWriteRejection)
+            throw new ServiceChangeRejectedError(rejectedBeforeWrite)
         }
     }
 }
