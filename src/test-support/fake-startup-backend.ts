@@ -42,6 +42,11 @@ export class FakeStartupBackend implements StartupBackend {
         for (const entry of runEntries) this.values.set(entry.name.toLowerCase(), entry)
     }
 
+    /** Puts a value in the fake HKCU Run key, as an app re-registering itself would. */
+    register(entry: StartupEntry): void {
+        this.values.set(entry.name.toLowerCase(), entry)
+    }
+
     /** The command currently stored in the fake HKCU Run key, or undefined when absent. */
     runValue(name: string): string | undefined {
         return this.values.get(name.toLowerCase())?.command

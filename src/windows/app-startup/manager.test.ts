@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { FakeStartupBackend, otherEntry, runEntry } from '../../test-support/fake-startup-backend.ts'
 import { createSandbox, type Sandbox } from '../../test-support/fixtures.ts'
 import { disableSignInEntry, reapplyStartupPreferences, restoreSignInEntry } from './manager.ts'
-import { readPreferences } from './preferences.ts'
+import { readPreferences, savePreferences } from './preferences.ts'
 
 const t3 = String.raw`C:\Users\test\AppData\Local\Programs\t3code\T3 Code.exe`
 
@@ -48,18 +48,52 @@ describe('sign-in entry management', () => {
         expect(await failure(disableSignInEntry(sandbox.paths, backend, 't3-code'))).toContain('Choose one startup entry by name: One, Two.')
     })
 
-    test('restore finishes an interrupted restore instead of disabling again', async () => {
+    test('a failed restore leaves the preference ready to try again instead of stuck', async () => {
         const entry = runEntry('t3-code', 'T3 Code', t3)
         const backend = new FakeStartupBackend([entry])
         await disableSignInEntry(sandbox.paths, backend, 't3-code', 'T3 Code')
         backend.failing.add('t3 code')
         expect(await failure(restoreSignInEntry(sandbox.paths, backend, 't3-code', 'T3 Code'))).toContain('Simulated failure')
-        expect((await readPreferences(sandbox.paths))[0]?.restorePending).toBe(true)
-        expect(await failure(disableSignInEntry(sandbox.paths, backend, 't3-code', 'T3 Code'))).toContain('Finish restoring T3 Code')
+        expect((await readPreferences(sandbox.paths))[0]?.restorePending).toBe(false)
 
         backend.failing.clear()
+        expect(await disableSignInEntry(sandbox.paths, backend, 't3-code', 'T3 Code')).toContain('already absent')
+
         await restoreSignInEntry(sandbox.paths, backend, 't3-code', 'T3 Code')
         expect(backend.runValue('T3 Code')).toBe(entry.command)
+        expect(await readPreferences(sandbox.paths)).toEqual([])
+    })
+
+    test('restore finishes a restore interrupted after the value was written', async () => {
+        const entry = runEntry('t3-code', 'T3 Code', t3)
+        const backend = new FakeStartupBackend()
+        await savePreferences(sandbox.paths, [{ app: 't3-code', name: 'T3 Code', command: entry.command, valueKind: 'String', target: t3, restorePending: true }])
+        expect(await failure(disableSignInEntry(sandbox.paths, backend, 't3-code', 'T3 Code'))).toContain('Finish restoring T3 Code')
+
+        backend.register(entry)
+        await restoreSignInEntry(sandbox.paths, backend, 't3-code', 'T3 Code')
+        expect(backend.runValue('T3 Code')).toBe(entry.command)
+        expect(await readPreferences(sandbox.paths)).toEqual([])
+    })
+
+    test('restore forgets the preference when the app registered a different command itself', async () => {
+        const original = runEntry('t3-code', 'T3 Code', t3)
+        const backend = new FakeStartupBackend([original])
+        await disableSignInEntry(sandbox.paths, backend, 't3-code', 'T3 Code')
+        const reregistered = { ...original, command: `"${t3}" --minimized` }
+        backend.register(reregistered)
+
+        await restoreSignInEntry(sandbox.paths, backend, 't3-code', 'T3 Code')
+        expect(backend.runValue('T3 Code')).toBe(reregistered.command)
+        expect(await readPreferences(sandbox.paths)).toEqual([])
+    })
+
+    test('disabling refuses an entry that changed since the plan showed it', async () => {
+        const entry = runEntry('t3-code', 'T3 Code', t3)
+        const backend = new FakeStartupBackend([{ ...entry, command: `"${t3}" --minimized` }])
+        const message = await failure(disableSignInEntry(sandbox.paths, backend, 't3-code', 'T3 Code', { command: entry.command, valueKind: 'String' }))
+        expect(message).toContain('changed since the plan was shown')
+        expect(backend.changes).toEqual([])
         expect(await readPreferences(sandbox.paths)).toEqual([])
     })
 })

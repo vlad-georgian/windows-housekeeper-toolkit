@@ -8,7 +8,7 @@ import { cancelled, type LaunchOperation, type PlanSection } from '../launch/typ
 import { FakePrompts } from '../test-support/fake-prompts.ts'
 import { FakeStartupBackend, otherEntry, runEntry } from '../test-support/fake-startup-backend.ts'
 import { createSandbox, type Sandbox } from '../test-support/fixtures.ts'
-import { readPreferences } from '../windows/app-startup/preferences.ts'
+import { readPreferences, savePreferences } from '../windows/app-startup/preferences.ts'
 import { readSignInSettings } from '../windows/signin.ts'
 import { createStartupOperation, type StartupSession } from './operation.ts'
 import { createSignInStartupProvider } from './signin-provider.ts'
@@ -117,6 +117,39 @@ describe('startup operation', () => {
         expect([...session.summary.failedApps]).toEqual(['startup'])
     })
 
+    test('a provider that cannot inspect is reported while the other providers still offer their choices', async () => {
+        const applied: string[] = []
+        const broken: StartupProvider = { id: 'broken', inspect: () => Promise.reject(new Error('PowerShell timed out')) }
+        const prompts = new FakePrompts([['a'], []])
+        const section = planned(await createStartupOperation([broken, stubProvider(applied)], session).gather(prompts))
+        expect(prompts.notes[0]).toEqual({ title: 'Could not inspect startup source "broken"', lines: ['PowerShell timed out'] })
+        expect(section.lines).toEqual(['First group', '  change a'])
+        expect(session.summary.failures).toBe(1)
+        expect([...session.summary.failedApps]).toEqual(['startup'])
+    })
+
+    test('records successful changes and failures in the audit log', async () => {
+        const applied: string[] = []
+        const section = planned(await createStartupOperation([stubProvider(applied, ['a'])], session).gather(new FakePrompts([['a', 'b'], []])))
+        await section.apply()
+        const records = (await Bun.file(session.audit.path).text())
+            .trim()
+            .split('\n')
+            .map((line): unknown => JSON.parse(line))
+        expect(records).toContainEqual(expect.objectContaining({ event: 'startup-changes', dryRun: false, messages: ['changed b'], failures: 1 }))
+    })
+
+    test('records a dry run in the audit log without applying', async () => {
+        await startSession(true)
+        const section = planned(await createStartupOperation([stubProvider([])], session).gather(new FakePrompts([['a'], []])))
+        await section.apply()
+        const records = (await Bun.file(session.audit.path).text())
+            .trim()
+            .split('\n')
+            .map((line): unknown => JSON.parse(line))
+        expect(records).toContainEqual(expect.objectContaining({ event: 'startup-changes', dryRun: true, messages: ['Item a was not changed (dry run)'], failures: 0 }))
+    })
+
     test('reports nothing to manage when no provider offers a choice', async () => {
         const prompts = new FakePrompts([])
         expect(await createStartupOperation([{ id: 'none', inspect: () => Promise.resolve({ notes: [], groups: [] }) }], session).gather(prompts)).toBeNull()
@@ -197,21 +230,81 @@ describe('sign-in app startup', () => {
         expect(prompts.checklists.map((request) => request.options.map((option) => option.label))).toEqual([['T3 Code · T3 Code'], ['OpenCode · OpenCode']])
     })
 
-    test('finishes an interrupted restore', async () => {
+    test('finishes a restore that was interrupted after the value was written', async () => {
+        const fake = new FakeStartupBackend()
+        const entry = runEntry('opencode', 'OpenCode', opencode)
+        await savePreferences(sandbox.paths, [{ app: 'opencode', name: 'OpenCode', command: entry.command, valueKind: 'String', target: opencode, restorePending: true }])
+        const prompts = new FakePrompts([['restore:opencode:opencode']])
+        await planned(await signInOperation(fake).gather(prompts)).apply()
+        expect(fake.runValue('OpenCode')).toBe(entry.command)
+        expect(prompts.checklists[0]?.options[0]?.hint).toContain('Restore was interrupted')
+        expect(session.summary.failures).toBe(0)
+        expect(await readPreferences(sandbox.paths)).toEqual([])
+    })
+
+    test('a failed restore can be retried', async () => {
         const fake = machine()
         await planned(await signInOperation(fake).gather(new FakePrompts([['disable:opencode:opencode']]))).apply()
         fake.failing.add('opencode')
-        const first = planned(await signInOperation(fake).gather(new FakePrompts([[], ['restore:opencode:opencode']])))
-        await first.apply()
+        await planned(await signInOperation(fake).gather(new FakePrompts([[], ['restore:opencode:opencode']]))).apply()
         expect(session.summary.failures).toBe(1)
-        expect((await readPreferences(sandbox.paths))[0]?.restorePending).toBe(true)
 
         fake.failing.clear()
         const prompts = new FakePrompts([[], ['restore:opencode:opencode']])
         await planned(await signInOperation(fake).gather(prompts)).apply()
-        expect(prompts.checklists[1]?.options[0]?.hint).toContain('Restore was interrupted')
+        expect(prompts.checklists.map((request) => request.options.map((option) => option.label))).toEqual([['T3 Code · T3 Code'], ['OpenCode · OpenCode']])
         expect(fake.runValue('OpenCode')).toBeDefined()
         expect(await readPreferences(sandbox.paths)).toEqual([])
+    })
+
+    test('an entry with a saved preference is offered only for restore, even when the app registered it again', async () => {
+        const fake = machine()
+        await planned(await signInOperation(fake).gather(new FakePrompts([['disable:t3-code:t3 code']]))).apply()
+        fake.register(runEntry('t3-code', 'T3 Code', t3))
+
+        const prompts = new FakePrompts([[], []])
+        expect(await signInOperation(fake).gather(prompts)).toBeNull()
+        expect(prompts.checklists.map((request) => request.options.map((option) => option.label))).toEqual([['OpenCode · OpenCode'], ['T3 Code · T3 Code']])
+        expect(prompts.checklists[1]?.options[0]?.hint).toContain('registered it again')
+    })
+
+    test('restoring an entry the app registered again with a different command forgets the preference without failing', async () => {
+        const fake = machine()
+        await planned(await signInOperation(fake).gather(new FakePrompts([['disable:t3-code:t3 code']]))).apply()
+        const reregistered = { ...runEntry('t3-code', 'T3 Code', t3), command: `"${t3}" --minimized` }
+        fake.register(reregistered)
+
+        const section = planned(await signInOperation(fake).gather(new FakePrompts([[], ['restore:t3-code:t3 code']])))
+        expect(section.lines.join('\n')).toContain('forgets the saved preference')
+        await section.apply()
+        expect(session.summary.failures).toBe(0)
+        expect(fake.runValue('T3 Code')).toBe(reregistered.command)
+        expect(await readPreferences(sandbox.paths)).toEqual([])
+    })
+
+    test('turning off refuses an entry that changed after the plan was shown', async () => {
+        const fake = machine()
+        const section = planned(await signInOperation(fake).gather(new FakePrompts([['disable:t3-code:t3 code']])))
+        fake.register({ ...runEntry('t3-code', 'T3 Code', t3), command: `"${t3}" --minimized` })
+        await section.apply()
+        expect(session.summary.failures).toBe(1)
+        expect(fake.changes).toEqual([])
+        expect(fake.runValue('T3 Code')).toContain('--minimized')
+        expect(await readPreferences(sandbox.paths)).toEqual([])
+    })
+
+    test('an invalid saved-preferences file does not stop the launch menu', async () => {
+        await writeState(sandbox.paths, 'app-startup.json', { not: 'a list' })
+        const other: LaunchOperation = {
+            id: 'other',
+            label: 'Other',
+            gather: () => Promise.resolve({ title: 'Other plan', lines: ['other line'], apply: () => Promise.resolve() })
+        }
+        const prompts = new FakePrompts([['other', 'startup'], true])
+        const outcome = await runLaunchMenu([other, signInOperation(machine())], prompts, { dryRun: false })
+        expect(outcome).toBe('applied')
+        expect(prompts.notes.map((note) => note.title)).toContain('Could not inspect startup source "signin"')
+        expect(session.summary.failures).toBe(1)
     })
 
     test('cancelling a checklist leaves every entry and preference unchanged', async () => {

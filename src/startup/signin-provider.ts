@@ -2,7 +2,7 @@ import type { SystemPaths } from '../core/system-paths.ts'
 import { appNames } from '../windows/app-catalog.ts'
 import type { StartupBackend } from '../windows/app-startup/backend.ts'
 import type { StartupEntry } from '../windows/app-startup/inventory.ts'
-import { disableSignInEntry, restoreSignInEntry } from '../windows/app-startup/manager.ts'
+import { disableSignInEntry, isRegistered, restoreSignInEntry } from '../windows/app-startup/manager.ts'
 import { nameMatches, readPreferences, type StartupPreference } from '../windows/app-startup/preferences.ts'
 import { settingsGuide } from '../windows/app-startup/status.ts'
 import type { StartupChoice, StartupInspection, StartupNote, StartupProvider } from './types.ts'
@@ -24,18 +24,22 @@ function disableChoice(paths: SystemPaths, backend: StartupBackend, entry: Start
         label,
         hint: `${scope} · ${entry.target}`,
         planLines: [label, `  Removes the HKCU Run value and saves it for restore: ${entry.command}`],
-        apply: () => disableSignInEntry(paths, backend, entry.app, entry.name)
+        apply: () => disableSignInEntry(paths, backend, entry.app, entry.name, { command: entry.command, valueKind: entry.valueKind })
     }
 }
 
 function restoreChoice(paths: SystemPaths, backend: StartupBackend, preference: StartupPreference, present: boolean): StartupChoice {
     const label = `${appNames[preference.app]} · ${preference.name}`
-    const state = preference.restorePending ? 'Restore was interrupted; finish restoring it' : present ? 'The entry is already present' : 'Disabled by this tool'
+    const state = present
+        ? 'The app registered it again; restoring keeps the current value and forgets the saved preference'
+        : preference.restorePending
+          ? 'Restore was interrupted; finish restoring it'
+          : 'Disabled by this tool'
     return {
         id: choiceId('restore', preference.app, preference.name),
         label,
         hint: `${scope} · ${state}`,
-        planLines: [label, `  Writes the saved HKCU Run value back: ${preference.command}`],
+        planLines: [label, present ? '  Keeps the current HKCU Run value and forgets the saved preference' : `  Writes the saved HKCU Run value back: ${preference.command}`],
         apply: () => restoreSignInEntry(paths, backend, preference.app, preference.name)
     }
 }
@@ -59,18 +63,12 @@ export function createSignInStartupProvider(paths: SystemPaths, backend: Startup
         id: 'signin',
         async inspect(): Promise<StartupInspection> {
             const [snapshot, preferences] = await Promise.all([backend.inspect(), readPreferences(paths)])
+            // An entry with a saved preference is only ever offered for restore, so no entry is in both lists.
             const disable = snapshot.entries
                 .filter(isManageable)
-                .filter((entry) => !preferences.some((preference) => preference.restorePending && nameMatches(preference.name, entry.name)))
+                .filter((entry) => !preferences.some((preference) => nameMatches(preference.name, entry.name)))
                 .map((entry) => disableChoice(paths, backend, entry))
-            const restore = preferences.map((preference) =>
-                restoreChoice(
-                    paths,
-                    backend,
-                    preference,
-                    snapshot.entries.some((entry) => isManageable(entry) && nameMatches(entry.name, preference.name))
-                )
-            )
+            const restore = preferences.map((preference) => restoreChoice(paths, backend, preference, isRegistered(snapshot.entries, preference)))
             return {
                 notes: otherMechanisms(
                     snapshot.entries,

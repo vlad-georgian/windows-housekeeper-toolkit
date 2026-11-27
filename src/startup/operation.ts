@@ -2,7 +2,7 @@ import type { CleanupSummary } from '../cleanup/summary.ts'
 import type { AuditLogger } from '../core/audit-logger.ts'
 import { errorMessage } from '../core/format.ts'
 import { cancelled, type LaunchOperation, type LaunchPrompts, type PlanSection } from '../launch/types.ts'
-import type { StartupChoice, StartupGroup, StartupProvider } from './types.ts'
+import type { StartupChoice, StartupGroup, StartupInspection, StartupProvider } from './types.ts'
 
 /** The parts of a run's shared state that startup changes report into. */
 export interface StartupSession {
@@ -28,7 +28,19 @@ export function createStartupOperation(providers: readonly StartupProvider[], se
         label: 'Manage automatic startup',
         async gather(prompts: LaunchPrompts): Promise<PlanSection | null | typeof cancelled> {
             prompts.log('Inspecting app startup entries…')
-            const inspections = await Promise.all(providers.map((provider) => provider.inspect()))
+            const inspections = await Promise.all(
+                providers.map(async (provider): Promise<StartupInspection> => {
+                    try {
+                        return await provider.inspect()
+                    } catch (error) {
+                        // One source failing must not abort the other operations or providers.
+                        session.summary.failures++
+                        session.summary.failedApps.add('startup')
+                        await session.audit.recordError('startup', provider.id, null, error)
+                        return { groups: [], notes: [{ title: `Could not inspect startup source "${provider.id}"`, lines: [errorMessage(error)] }] }
+                    }
+                })
+            )
             for (const note of inspections.flatMap((inspection) => inspection.notes)) prompts.note(note.title, note.lines)
 
             const groups = inspections.flatMap((inspection) => inspection.groups).filter((group) => group.choices.length > 0)
@@ -55,20 +67,27 @@ export function createStartupOperation(providers: readonly StartupProvider[], se
                 title: 'Manage automatic startup',
                 lines: chosen.flatMap(({ group, choices }) => [group.title, ...choices.flatMap((choice) => choice.planLines.map((line) => `  ${line}`))]),
                 async apply() {
+                    const messages: string[] = []
+                    let failures = 0
                     for (const choice of chosen.flatMap((entry) => entry.choices)) {
                         if (session.dryRun) {
+                            messages.push(`${choice.label} was not changed (dry run)`)
                             prompts.log(`Dry run: ${choice.label} was not changed.`)
                             continue
                         }
                         try {
-                            prompts.log(await choice.apply())
+                            const message = await choice.apply()
+                            messages.push(message)
+                            prompts.log(message)
                         } catch (error) {
+                            failures++
                             session.summary.failures++
                             session.summary.failedApps.add('startup')
                             prompts.log(`Could not change ${choice.label}: ${errorMessage(error)}`)
                             await session.audit.recordError('startup', choice.label, null, error)
                         }
                     }
+                    await session.audit.recordStartupChanges(messages, failures, session.dryRun)
                 }
             }
         }

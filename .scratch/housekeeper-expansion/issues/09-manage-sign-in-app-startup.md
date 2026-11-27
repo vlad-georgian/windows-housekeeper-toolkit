@@ -27,3 +27,9 @@ Resolved on branch `ticket/09-sign-in-startup`.
 - Other mechanisms (machine-wide Run, RunOnce, Startup folders, scheduled logon tasks, packaged startup tasks) and inspection warnings appear in a "not changed here" note, never as choices.
 - Decision: two checklists (turn off, restore) rather than one toggle list, so every choice means "change this" and nothing is pre-checked.
 - No real (non-dry) run was performed against the machine; verification uses fakes and sandboxes only.
+
+### Review follow-up
+
+- An entry with a saved preference is offered only in the restore list. If the app registered its own HKCU Run value again, restoring keeps that value and forgets the preference instead of failing. A restore that fails before writing resets `restorePending`, so it can be retried and the entry is not blocked.
+- A provider whose `inspect()` throws is reported as a "Could not inspect" note and counted as a startup failure; other providers and operations continue. Ticket 10's provider gets this for free.
+- Turning off compares the entry with the command the plan showed and refuses if it changed. Applied and failed changes are written to the audit log as one `startup-changes` record (dry runs too, with `dryRun: true`).
