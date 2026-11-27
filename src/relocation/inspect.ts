@@ -1,8 +1,12 @@
 import { lstat, realpath } from 'node:fs/promises'
+import { dirname } from 'node:path'
 
-import { canonicalPathKey } from '../core/filesystem/index.ts'
-import { hasErrorCode } from '../core/filesystem/paths.ts'
-import { mirroredPath, relocationBaseOf } from './layout.ts'
+import { canonicalPathKey, isPathInside } from '../core/filesystem/index.ts'
+import { hasErrorCode, isUnavailablePath, UnverifiedPathError } from '../core/filesystem/paths.ts'
+import { errorMessage } from '../core/format.ts'
+import { windowsDriveType } from '../windows/drives.ts'
+import { inspectDirectoryPath, readDirectoryIdentity, storedLinkTarget } from './directory-path.ts'
+import { type BaseValidationOptions, differentVolumes, mirroredPath, relocationBaseOf, validateRelocationBase } from './layout.ts'
 import type { RelocatableApp, RelocationPath } from './types.ts'
 
 /** Where an app path currently stores its data. */
@@ -36,11 +40,15 @@ export async function inspectPath(path: string): Promise<PathState> {
     }
     if (stats.isSymbolicLink()) {
         try {
-            const target = await realpath(path)
-            if (!(await lstat(target)).isDirectory()) return { kind: 'unsupported', reason: `${path} links to ${target}, which is not a directory` }
+            await readDirectoryIdentity(dirname(path))
+            const target = await storedLinkTarget(path)
+            const directories = await inspectDirectoryPath(target)
+            const last = directories.at(-1)
+            if (!last || canonicalPathKey(last.path) !== canonicalPathKey(target)) return { kind: 'unsupported', reason: `${path} links to a missing directory` }
+            if (canonicalPathKey(await realpath(path)) !== canonicalPathKey(target)) return { kind: 'unsupported', reason: `${path} does not resolve directly to ${target}` }
             return { kind: 'linked', target }
         } catch (error) {
-            if (hasErrorCode(error, 'ENOENT', 'ENOTDIR')) return { kind: 'unsupported', reason: `${path} links to a missing directory` }
+            if (error instanceof UnverifiedPathError || isUnavailablePath(error)) return { kind: 'unsupported', reason: errorMessage(error) }
             throw error
         }
     }
@@ -55,15 +63,32 @@ export async function inspectPath(path: string): Promise<PathState> {
  * Inspects each configured path. The app is migrated only when every applicable path links to
  * its mirrored destination under one base.
  */
-export async function inspectApp(app: RelocatableApp, home: string): Promise<AppInspection> {
+export async function inspectApp(
+    app: RelocatableApp,
+    home: string,
+    validation: Pick<BaseValidationOptions, 'driveType' | 'volumesDiffer'> = { driveType: windowsDriveType, volumesDiffer: differentVolumes }
+): Promise<AppInspection | { blocked: string }> {
+    const outside = app.paths.find((entry) => !isPathInside(entry.path, home))
+    if (outside) return { blocked: `${outside.path} is outside the Windows profile ${home}` }
+
     const inspected: InspectedPath[] = []
     for (const entry of app.paths) inspected.push({ ...entry, state: await inspectPath(entry.path) })
     const applicable = inspected.filter((entry) => entry.state.kind !== 'missing')
 
     const nonLocal = applicable.filter((entry) => entry.state.kind !== 'local')
+    for (const { state } of nonLocal) if (state.kind === 'unsupported') return { blocked: state.reason }
     const bases = nonLocal.map((entry) => (entry.state.kind === 'linked' ? relocationBaseOf(entry.state.target, home, entry.path) : null))
     const [first] = bases
     const restoreBase = first && bases.every((base) => base !== null && canonicalPathKey(base) === canonicalPathKey(first)) ? first : null
+    if (restoreBase !== null) {
+        const originals = nonLocal.map((entry) => dirname(entry.path))
+        try {
+            const problem = await validateRelocationBase(restoreBase, { ...validation, home, originals })
+            if (problem !== null) return { blocked: `${restoreBase} is ineligible. ${problem}` }
+        } catch (error) {
+            return { blocked: `Could not verify the inferred base ${restoreBase}. ${errorMessage(error)}` }
+        }
+    }
     const migratedBase = nonLocal.length === applicable.length ? restoreBase : null
     return { app, applicable, migratedBase, restoreBase }
 }

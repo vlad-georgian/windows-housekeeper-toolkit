@@ -7,8 +7,10 @@ path usable through a directory junction. See
 
 Each original path is mirrored as `<base>\<profile name>\<profile-relative path>`.
 An app starts checked only when every applicable path links to its mirrored
-destination under one base. Checking an unmigrated app moves its local paths,
-and paths that already link to the mirrored destination stay as they are.
+destination under one eligible base. The operation verifies each stored target
+and compares its inferred volume against the original path's parent volume.
+Checking an unmigrated app moves its local paths. Previously mirrored paths are
+revalidated before a partial move applies its remaining transfers.
 Clearing a migrated app restores the latest contents to the original paths.
 
 | File                                                          | Responsibility                                                                                                                               |
@@ -32,12 +34,12 @@ Clearing a migrated app restores the latest contents to the original paths.
 2. Create missing destination parents one at a time and record the directories
    created during this transfer.
 3. Copy the tree to a staging directory beside the destination, verify the
-   contents, read-only flags, and that the current user can read and write
-   the copy, then rename it into place.
+   contents, read-only flags, discretionary access rules, owner, group, and
+   the current user's write access, then rename it into place.
 4. Rename the original aside, verify it did not change during the copy,
    create the junction, and verify that it resolves to the destination.
-5. Verify the identity of the placed copy, then verify and remove the
-   set-aside original.
+5. Verify the set-aside original. Verify the placed copy's identity, contents,
+   permissions, and junction before removing the set-aside original.
 
 ## Restoring a directory
 
@@ -45,8 +47,8 @@ Clearing a migrated app restores the latest contents to the original paths.
    verify it.
 2. Remove the junction, verify the destination did not change during the
    copy, and rename the staging directory into the original path.
-3. Remove the destination after verifying its identity and contents. Restore
-   keeps its empty parents because their ownership is unknown.
+3. Verify the destination and the final restored copy before removing the
+   destination. Restore keeps its empty parents because their ownership is unknown.
 
 After a failure before the swap is verified, the transfer attempts to undo
 its changes. Move rollback removes the destination only after successful

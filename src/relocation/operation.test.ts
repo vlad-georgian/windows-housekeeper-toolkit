@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { lstat, readdir, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { pathExists } from '../core/filesystem/index.ts'
 import { cancelled, type PlanSection } from '../launch/types.ts'
@@ -9,8 +9,8 @@ import { createSandbox, type Sandbox } from '../test-support/fixtures.ts'
 import type { WindowsProcess } from '../windows/processes.ts'
 import { createRelocationCatalog } from './apps/index.ts'
 import { createRecoveryJournal, type RecoveryJournal } from './journal.ts'
-import type { VolumeComparison } from './layout.ts'
-import { createRelocationOperation, type RelocationEvent } from './operation.ts'
+import { differentVolumes, type VolumeComparison } from './layout.ts'
+import { createRelocationOperation, type RelocationEvent, type RelocationOptions } from './operation.ts'
 import { restoreDirectory } from './transfer.ts'
 
 let sandbox: Sandbox
@@ -24,7 +24,11 @@ const desktopData = (): string => join(sandbox.paths.roamingAppData, 'GitHub Des
 const extensions = (): string => join(sandbox.paths.home, '.vscode', 'extensions')
 const mirrored = (original: string): string => join(base, 'test', original.slice(sandbox.paths.home.length + 1))
 
-function operation(dryRun = false, volumesDiffer: VolumeComparison = async () => true): ReturnType<typeof createRelocationOperation> {
+function operation(
+    dryRun = false,
+    volumesDiffer: VolumeComparison = async () => true,
+    overrides: Partial<Pick<RelocationOptions, 'catalog' | 'driveType'>> = {}
+): ReturnType<typeof createRelocationOperation> {
     return createRelocationOperation({
         home: sandbox.paths.home,
         catalog: createRelocationCatalog(sandbox.paths),
@@ -36,7 +40,8 @@ function operation(dryRun = false, volumesDiffer: VolumeComparison = async () =>
         driveType: async () => 'fixed',
         report: async (event) => {
             events.push(event)
-        }
+        },
+        ...overrides
     })
 }
 
@@ -65,6 +70,63 @@ beforeEach(async () => {
 })
 
 afterEach(() => sandbox.dispose())
+
+test.each(['same volume', 'network drive'] as const)('leaves a mirrored junction on an ineligible %s untouched', async (kind) => {
+    const parent = await sandbox.directory('E/Software/test/.vscode')
+    const target = join(parent, 'extensions')
+    await rename(extensions(), target)
+    await symlink(target, extensions(), 'junction')
+    const prompts = new FakePrompts([[]])
+    const subject = kind === 'same volume' ? operation(true, differentVolumes) : operation(true, undefined, { driveType: async () => 'network' })
+
+    expect(await subject.gather(prompts)).toBeNull()
+    expect(prompts.checklists[0]?.initialValues).toEqual([])
+    expect(prompts.logs.join(' ')).toContain(kind === 'same volume' ? 'another drive' : 'network drive')
+    expect(await isLinkTo(extensions(), target)).toBe(true)
+})
+
+test('blocks only an application with out-of-profile data', async () => {
+    const redirected = await sandbox.directory('Redirected')
+    await sandbox.file('Redirected/GitHub Desktop/window-state.json', '{}')
+    const catalog = createRelocationCatalog({ ...sandbox.paths, roamingAppData: redirected })
+    const prompts = new FakePrompts([['github-desktop', 'vscode-extensions'], base])
+
+    const section = planned(await operation(true, undefined, { catalog }).gather(prompts))
+    expect(section.lines[0]).toBe('Move Visual Studio Code extensions to another drive')
+    expect(prompts.logs.join(' ')).toContain('outside the Windows profile')
+    expect(await pathExists(base)).toBe(false)
+})
+
+test('rejects a stored junction target that redirects below the original base', async () => {
+    await sandbox.directory('E/Software')
+    const outside = await sandbox.directory('Elsewhere/test/.vscode')
+    const target = join(outside, 'extensions')
+    await rename(extensions(), target)
+    await symlink(dirname(outside), join(base, 'test'), 'junction')
+    await symlink(mirrored(extensions()), extensions(), 'junction')
+    const prompts = new FakePrompts([[]])
+
+    expect(await operation(true).gather(prompts)).toBeNull()
+    expect(prompts.logs.join(' ')).toContain('resolves through a link')
+    expect(await isLinkTo(extensions(), target)).toBe(true)
+})
+
+test('rechecks retained paths before applying a partial move', async () => {
+    const installParent = await sandbox.directory('E/Software/test/AppData/Local')
+    const install = mirrored(desktopInstall())
+    await rename(desktopInstall(), install)
+    await symlink(install, desktopInstall(), 'junction')
+    const prompts = new FakePrompts([['github-desktop'], base])
+    const subject = operation(false, async (_base, source) => source === dirname(desktopInstall()) || source === desktopData())
+    const section = planned(await subject.gather(prompts))
+
+    await rename(installParent, join(base, 'old-local'))
+    await symlink(await sandbox.directory('Elsewhere'), installParent, 'junction')
+    await section.apply()
+
+    expect((await lstat(desktopData())).isSymbolicLink()).toBe(false)
+    expect(events).toMatchObject([{ kind: 'failed', original: desktopInstall(), notAttempted: [desktopData()] }])
+})
 
 describe('moving apps to another drive', () => {
     test('offers installed apps unchecked, then moves newly selected apps under the base', async () => {
@@ -100,7 +162,7 @@ describe('moving apps to another drive', () => {
         expect(prompts.checklists[0]?.initialValues).toEqual(['github-desktop', 'vscode-extensions'])
         expect(prompts.checklists[0]?.options[0]?.hint).toContain(base)
         expect(prompts.texts).toEqual([])
-    })
+    }, 15_000)
 
     test('asks again until the base is an absolute directory on another drive', async () => {
         const prompts = new FakePrompts([['vscode-extensions'], 'Software', join(sandbox.paths.home, 'Moved'), base])
@@ -200,7 +262,7 @@ describe('moving apps to another drive', () => {
 
         expect(await isLinkTo(desktopInstall(), mirrored(desktopInstall()))).toBe(true)
         expect(await isLinkTo(desktopData(), mirrored(desktopData()))).toBe(true)
-    })
+    }, 15_000)
 
     test('refuses to move an app whose path links somewhere else', async () => {
         const elsewhere = await sandbox.directory('Elsewhere/extensions')
@@ -260,7 +322,7 @@ describe('restoring migrated applications', () => {
         expect(await readFile(join(desktopData(), 'window-state.json'), 'utf8')).toBe('latest')
         expect(events).toMatchObject([{ kind: 'restored', original: desktopData() }])
         expect(await operation().gather(new FakePrompts([[]]))).toBeNull()
-    })
+    }, 15_000)
 
     test('clearing a migrated application restores its latest contents and releases the destination', async () => {
         await moveApps(['github-desktop'])
@@ -282,7 +344,7 @@ describe('restoring migrated applications', () => {
         expect(await pathExists(mirrored(desktopInstall()))).toBe(false)
         expect(await pathExists(mirrored(desktopData()))).toBe(false)
         expect(events).toMatchObject([{ kind: 'restored' }, { kind: 'restored' }])
-    })
+    }, 15_000)
 
     test('reports a migrated application that cannot be restored without changing it', async () => {
         await moveApps(['vscode-extensions'])

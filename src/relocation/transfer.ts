@@ -12,7 +12,8 @@ import {
     inspectDestinationPath,
     inspectDirectoryPath,
     readDirectoryIdentity,
-    requireDirectoryIdentity
+    requireDirectoryIdentity,
+    storedLinkTarget
 } from './directory-path.ts'
 import type { RecoveryJournal, RecoveryRecord, TransferPhase } from './journal.ts'
 import { nearestExistingPath } from './layout.ts'
@@ -65,12 +66,13 @@ async function lstatIfPresent(path: string): Promise<Stats | null> {
     }
 }
 
-/** Whether `path` is a link that resolves to the directory at `target`. */
+/** Whether `path` names and resolves directly to the expected directory. */
 export async function linksTo(path: string, target: string): Promise<boolean> {
     const stats = await lstatIfPresent(path)
     if (!stats?.isSymbolicLink()) return false
     try {
-        return canonicalPathKey(await realpath(path)) === canonicalPathKey(await realpath(target))
+        const expected = canonicalPathKey(target)
+        return canonicalPathKey(await storedLinkTarget(path)) === expected && canonicalPathKey(await realpath(path)) === expected
     } catch (error) {
         if (hasErrorCode(error, 'ENOENT', 'ENOTDIR')) return false
         throw error

@@ -60,7 +60,7 @@ const driveDescriptions: Readonly<Record<Exclude<DriveKind, 'fixed'>, string>> =
 
 export interface BaseValidationOptions {
     readonly home: string
-    /** The original paths that will move under the base. Paths already linked are excluded. */
+    /** Paths on the source volumes, using the original parent for an already-linked path. */
     readonly originals: readonly string[]
     readonly volumesDiffer: VolumeComparison
     readonly driveType: DriveTypeLookup

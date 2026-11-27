@@ -1,4 +1,4 @@
-import { lstat, mkdir, realpath } from 'node:fs/promises'
+import { lstat, mkdir, readlink, realpath } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 
 import { canonicalPathKey, entryIdentity, hasErrorCode, isPathInside, UnverifiedPathError } from '../core/filesystem/paths.ts'
@@ -6,6 +6,12 @@ import { canonicalPathKey, entryIdentity, hasErrorCode, isPathInside, Unverified
 export interface DirectoryIdentity {
     readonly path: string
     readonly identity: string
+}
+
+/** Resolves the stored spelling against the link's parent without following its target. */
+export async function storedLinkTarget(path: string): Promise<string> {
+    const target = await readlink(path)
+    return resolve(dirname(path), target.replace(/^\\\\\?\\(?=[a-z]:[\\/])/i, ''))
 }
 
 function directoryComponents(path: string): string[] {

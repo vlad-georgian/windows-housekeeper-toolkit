@@ -115,10 +115,12 @@ your Windows profile name, and its profile-relative path, so
 `E:\Software\you\AppData\Local\GitHubDesktop` with a base of `E:\Software`.
 The original path becomes a directory junction, so the app keeps working.
 
-The CLI verifies the copied files, read-only flags, write access, and the
-junction before it removes the original copy. Clear a migrated application to
-restore its latest files to the original paths. The CLI verifies the restored
-copy before removing the relocated copy. Empty parent folders are kept.
+The CLI compares copied files, read-only flags, and Windows owner, group,
+and discretionary access rules for every file and directory. It tests write
+access and verifies the junction. An ACL difference or an unreadable security
+descriptor stops the transfer. Clear a migrated application to restore its
+latest files to the original paths. Both operations verify the surviving copy
+at its final path before removing the old copy. Restore keeps empty parents.
 
 An application with both local paths and paths mirrored under one base appears
 as partially migrated. Check it to finish moving to that base, or leave it
@@ -128,6 +130,10 @@ reports running apps and existing destinations before any data changes. Close
 the apps before applying, or they are skipped. If a transfer leaves a recovery
 record, the CLI holds back that application and points to
 `%LOCALAPPDATA%\windows-housekeeper-toolkit\relocation-recovery.json`.
+
+An existing junction is eligible for restore when its stored target resolves
+directly to the mirrored location on another fixed local volume. An app with
+configured data outside the Windows profile is skipped individually.
 
 ### Recovering an interrupted relocation
 

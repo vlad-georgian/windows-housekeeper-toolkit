@@ -28,7 +28,7 @@ Resolved on branch `ticket/06-move-restore-apps`.
     - paths that link anywhere other than the mirrored destination (`moveSteps` → `blocked`)
     - trees containing links or hard-linked files (`UnsupportedTreeError` in `tree.ts`)
 - `LaunchPrompts` gained `text()`, and `FakePrompts` now records `texts` and `logs`. `src/test-support/rejection.ts` helps assert rejected promises, because Bun's `rejects` matcher is not thenable for the type-aware linter.
-- Copies inherit the destination's ACLs. Only read-only flags and the current user's read and write access are verified. Explicit ACLs are not preserved.
+- The transfer compares the owner, group, and discretionary ACL of each directory and file, and tests write access. It stops if permissions differ or cannot be verified. Before reclaiming either old tree, it verifies the full surviving tree at its final path.
 - Relocation failures count in the cleanup summary's failures and skipped running apps, so the closing summary still leads with cleanup bytes.
 - The legacy `migration` command and `src/windows/migration/` are removed.
 - Verification: `bun test` (68 tests, plus 2 opt-in cross-volume tests) and `bun run check`. The cross-volume test moved and restored a sandbox between C: and E:, run with `HOUSEKEEPER_TEST_OTHER_VOLUME` set to a disposable directory. No real, non-dry run of the CLI was performed.
@@ -38,3 +38,5 @@ Resolved on branch `ticket/06-move-restore-apps`.
 The PR review clarified the transfer contract for tickets 07 and 08. The `copying` phase keeps the verified copy in staging. The `swapping` phase covers placing it at the final path. Rollback proves it placed the destination and checks its identity before removal. It prunes only empty parents created in that move, verified again by identity.
 
 The `moveDirectory` and `restoreDirectory` entry points still accept the same arguments. When adding a confirmed plan, capture destination identities with `inspectDestinationPath` and pass them through `TransferOptions.destinationDirectories`, as the launch operation does now. The transfer entry points require plain directory ancestors, so link consolidation must verify and resolve legacy link targets before passing real directory paths to these primitives. The drive-type lookup remains injectable. `src/windows/drives.ts` owns the drive types and `layout.ts` still re-exports them.
+
+The Spec and Standards re-checks tightened the same seams. `linksTo` requires a direct stored target. App inspection can return a blocked reason, including out-of-profile data and an ineligible inferred base. Retained paths in partial moves must carry their planned identities into apply. `snapshotTree` includes Windows permissions for the root and all entries, so callers should build manifests through it.

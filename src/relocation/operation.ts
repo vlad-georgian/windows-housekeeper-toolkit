@@ -1,4 +1,4 @@
-import { resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 
 import { pathExists } from '../core/filesystem/index.ts'
 import { isUnavailablePath, UnverifiedPathError } from '../core/filesystem/paths.ts'
@@ -6,11 +6,11 @@ import { errorMessage, formatBytes } from '../core/format.ts'
 import { cancelled, type Cancelled, type LaunchOperation, type LaunchPrompts, type PlanSection } from '../launch/types.ts'
 import type { DriveTypeLookup } from '../windows/drives.ts'
 import { isAppRunning, type WindowsProcess } from '../windows/processes.ts'
-import { type DirectoryIdentity, inspectDestinationPath } from './directory-path.ts'
+import { type DirectoryIdentity, inspectDestinationPath, readDirectoryIdentity } from './directory-path.ts'
 import { type AppInspection, inspectApp, moveSteps } from './inspect.ts'
 import type { RecoveryJournal } from './journal.ts'
 import { validateRelocationBase, type VolumeComparison } from './layout.ts'
-import { IncompleteTransferError, moveDirectory, restoreDirectory, type TransferResult } from './transfer.ts'
+import { IncompleteTransferError, linksTo, moveDirectory, restoreDirectory, type TransferResult } from './transfer.ts'
 import { measureTree, UnsupportedTreeError } from './tree.ts'
 import type { RelocatableApp } from './types.ts'
 
@@ -44,6 +44,7 @@ interface PathTransfer {
     readonly original: string
     readonly destination: string
     readonly destinationDirectories: readonly DirectoryIdentity[]
+    readonly retained?: true
 }
 
 /** One app's part of the plan: move its local paths under a base, or restore its linked paths. */
@@ -114,11 +115,13 @@ async function askForBase(prompts: LaunchPrompts, options: RelocationOptions, or
 async function planMove(inspection: AppInspection, base: string, home: string): Promise<AppPlan> {
     const lines = [`Move ${inspection.app.label} to another drive`]
     const transfers: PathTransfer[] = []
+    const retained: PathTransfer[] = []
     for (const step of moveSteps(inspection, base, home)) {
         if (step.kind === 'blocked') return { blocked: step.reason }
         const destination = await planDestination(base, step.destination, step.kind === 'in-place' ? 'restore' : 'move')
         if ('blocked' in destination) return destination
         if (step.kind === 'in-place') {
+            retained.push({ original: step.path, destination: step.destination, destinationDirectories: destination.directories, retained: true })
             lines.push(`  ${step.path} already links to ${step.destination}`)
             continue
         }
@@ -128,7 +131,7 @@ async function planMove(inspection: AppInspection, base: string, home: string): 
         lines.push(`  ${step.path} → ${step.destination} (${size.size})`)
         transfers.push({ original: step.path, destination: step.destination, destinationDirectories: destination.directories })
     }
-    return { action: { app: inspection.app, action: 'move', base, transfers }, lines }
+    return { action: { app: inspection.app, action: 'move', base, transfers: [...retained, ...transfers] }, lines }
 }
 
 /** Plans a restore, or returns why the app cannot be restored. Nothing changes on disk. */
@@ -163,12 +166,21 @@ async function applyAction(action: AppAction, prompts: LaunchPrompts, options: R
     }
     const transfer = action.action === 'move' ? moveDirectory : restoreDirectory
     const completed: string[] = []
-    for (const [index, { original, destination, destinationDirectories }] of action.transfers.entries()) {
+    for (const [index, { original, destination, destinationDirectories, retained }] of action.transfers.entries()) {
         let result: TransferResult
         try {
+            if (retained) {
+                await inspectDestinationPath(action.base, destination, 'restore', destinationDirectories)
+                await readDirectoryIdentity(dirname(original))
+                if (!(await linksTo(original, destination))) throw new UnverifiedPathError(`${original} no longer links directly to ${destination}`)
+                continue
+            }
             result = await transfer({ appId: app.id, original, destination, base: action.base }, { journal: options.journal, destinationDirectories })
         } catch (error) {
-            const notAttempted = action.transfers.slice(index + 1).map((entry) => entry.original)
+            const notAttempted = action.transfers
+                .slice(index + 1)
+                .filter((entry) => !entry.retained)
+                .map((entry) => entry.original)
             prompts.log(`${app.label}: ${errorMessage(error)}`)
             for (const path of completed) prompts.log(`Completed ${action.action} for ${path}.`)
             prompts.log(`Transfer stopped at ${original}.`)
@@ -205,7 +217,11 @@ export function createRelocationOperation(options: RelocationOptions): LaunchOpe
             const inspections: AppInspection[] = []
             for (const app of options.catalog) {
                 if (held.has(app.id)) continue
-                const inspection = await inspectApp(app, options.home)
+                const inspection = await inspectApp(app, options.home, options)
+                if ('blocked' in inspection) {
+                    prompts.log(`${app.label} cannot be relocated. ${inspection.blocked}`)
+                    continue
+                }
                 if (inspection.applicable.length > 0) inspections.push(inspection)
             }
             if (inspections.length === 0) {
