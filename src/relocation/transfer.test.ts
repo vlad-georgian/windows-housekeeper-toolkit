@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { chmod, link, lstat, readdir, readFile, readlink, realpath, rename, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, link, lstat, readdir, readFile, readlink, realpath, rename, stat, symlink, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 
 import { pathExists } from '../core/filesystem/index.ts'
@@ -14,6 +14,62 @@ let journal: RecoveryJournal
 let original: string
 let destination: string
 let base: string
+
+test.each(['junction', 'move ancestor', 'restore ancestor'] as const)(
+    'retains recovery when the %s changes after survivor verification',
+    async (change) => {
+        const transfer = { appId: 'github-desktop', original, destination, base }
+        if (change === 'restore ancestor') await moveDirectory(transfer, { journal })
+        const perform = change === 'restore ancestor' ? restoreDirectory : moveDirectory
+        let retiring = ''
+        let finalCopy = change === 'restore ancestor' ? original : destination
+        const error = await rejection(
+            perform(transfer, {
+                journal,
+                async afterVerifyingSurvivor(record) {
+                    retiring = record.aside ?? destination
+                    if (change === 'junction') {
+                        await unlink(original)
+                        await symlink(await sandbox.directory('Elsewhere'), original, 'junction')
+                    } else {
+                        const parent = dirname(original)
+                        const saved = join(sandbox.root, 'SavedLocal')
+                        await rename(parent, saved)
+                        await symlink(saved, parent, 'junction')
+                        if (change === 'move ancestor') retiring = join(saved, basename(retiring))
+                        else finalCopy = join(saved, basename(original))
+                    }
+                }
+            })
+        )
+        expect(error).toBeInstanceOf(IncompleteTransferError)
+        expect(await journal.list()).toHaveLength(1)
+        expect(await readFile(join(retiring, 'Update.exe'), 'utf8')).toBe('updater')
+        expect(await readFile(join(finalCopy, 'Update.exe'), 'utf8')).toBe('updater')
+        await chmod(join(retiring, 'app-3.4.0', 'locked.dat'), 0o666)
+        await chmod(join(finalCopy, 'app-3.4.0', 'locked.dat'), 0o666)
+    },
+    15_000
+)
+
+test.each(['move', 'restore'] as const)(
+    'preserves the verified final copy and journal after late partial %s deletion',
+    async (action) => {
+        const transfer = { appId: 'github-desktop', original, destination, base }
+        if (action === 'restore') await moveDirectory(transfer, { journal })
+        const perform = action === 'move' ? moveDirectory : restoreDirectory
+        const error = await rejection(perform(transfer, { journal, failReclamationAfter: 2 }))
+        expect(error).toBeInstanceOf(IncompleteTransferError)
+        const [record] = await journal.list()
+        if (!record) throw new Error('Expected retained partial-deletion recovery.')
+        const retiring = record.aside ?? destination
+        const finalCopy = action === 'move' ? destination : original
+        expect(await readFile(join(finalCopy, 'app-3.4.0', 'locked.dat'), 'utf8')).toBe('read-only')
+        expect(await pathExists(join(retiring, 'app-3.4.0', 'locked.dat'))).toBe(false)
+        expect(await readFile(join(retiring, 'Update.exe'), 'utf8')).toBe('updater')
+    },
+    15_000
+)
 
 async function addAppFiles(directory = 'Users/test/AppData/Local/GitHubDesktop'): Promise<void> {
     await sandbox.file(join(directory, 'Update.exe'), 'updater')

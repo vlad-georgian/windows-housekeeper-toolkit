@@ -69,6 +69,14 @@ refuses deletion of its nonempty parent and the transfer keeps its journal.
 Any failure before deletion preserves the old tree. A later failure may leave
 the old tree partly reclaimed, with its changed entries and recovery record.
 
+The same native held set includes the captured ancestry of both paths and,
+for moves, the original junction. `ReclamationGuard` carries a path identity
+and optionally an expected junction target. Ancestors are acquired in path
+order with no-follow handles and checked as plain directories. Junctions are
+checked by file identity and `FSCTL_GET_REPARSE_POINT` for the mount-point tag
+and exact stored target. Security descriptors are read with `GetSecurityInfo`
+on the held objects. Regular tree entries still reject all reparse points.
+
 ## Tests
 
 Tests use disposable sandbox profiles and never touch the real profile. The

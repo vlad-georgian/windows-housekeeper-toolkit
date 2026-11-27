@@ -38,6 +38,8 @@ export interface TransferOptions {
     readonly beforePhase?: (phase: TransferPhase) => void | Promise<void>
     /** Runs inside survivor verification before the final guarded reclamation. */
     readonly afterVerifyingSurvivor?: (record: RecoveryRecord) => void | Promise<void>
+    /** Fixture fault injection after this many successful retiring-entry deletions. */
+    readonly failReclamationAfter?: number
 }
 
 export interface TransferResult {
@@ -279,7 +281,15 @@ export async function moveDirectory(transfer: DirectoryTransfer, options: Transf
                 await verifyJunction(original, destination)
                 await options.afterVerifyingSurvivor?.(tracker.record())
             },
-            { path: destination, identity: stagedIdentity }
+            { path: destination, identity: stagedIdentity },
+            {
+                guards: [
+                    ...originalDirectories.slice(0, -1),
+                    ...progress.destinationParents,
+                    { path: original, identity: progress.junctionIdentity ?? '', junctionTarget: destination }
+                ],
+                failAfter: options.failReclamationAfter
+            }
         )
     } catch (error) {
         throw new IncompleteTransferError(
@@ -379,7 +389,8 @@ export async function restoreDirectory(transfer: DirectoryTransfer, options: Tra
                 await requireDirectoryIdentity(original, restoredIdentity)
                 await options.afterVerifyingSurvivor?.(tracker.record())
             },
-            { path: original, identity: restoredIdentity }
+            { path: original, identity: restoredIdentity },
+            { guards: [...originalParents, ...destinationDirectories.slice(0, -1)], failAfter: options.failReclamationAfter }
         )
     } catch (error) {
         throw new IncompleteTransferError(

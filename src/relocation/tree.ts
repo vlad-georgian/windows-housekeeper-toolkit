@@ -4,7 +4,7 @@ import { chmod, copyFile, lstat, mkdir, open, readdir, rmdir, unlink, utimes, wr
 import { basename, dirname, join } from 'node:path'
 
 import { readWindowsFilePermissions } from '../windows/file-permissions.ts'
-import { reclaimWindowsTree, type ReclamationEntry } from '../windows/reclaim-tree.ts'
+import { reclaimWindowsTree, type ReclamationEntry, type ReclamationGuard } from '../windows/reclaim-tree.ts'
 import { type DirectoryIdentity, requireDirectoryIdentity } from './directory-path.ts'
 
 /** A directory tree holds something relocation cannot copy faithfully yet, such as a link. */
@@ -202,7 +202,14 @@ async function reclamationEntries(root: string, manifest: TreeManifest): Promise
 }
 
 /** Verifies both trees again under write-denying handles, and deletes only the validated old entries. */
-export async function removeTree(root: string, manifest: TreeManifest, identity?: string, verifySurvivor?: () => Promise<void>, survivor?: DirectoryIdentity): Promise<void> {
+export async function removeTree(
+    root: string,
+    manifest: TreeManifest,
+    identity?: string,
+    verifySurvivor?: () => Promise<void>,
+    survivor?: DirectoryIdentity,
+    protection?: { readonly guards: readonly ReclamationGuard[]; readonly failAfter?: number | undefined }
+): Promise<void> {
     if (identity !== undefined) await requireDirectoryIdentity(root, identity)
     await verifyTreeContents(root, manifest)
     await verifyTreePermissions(root, manifest)
@@ -211,7 +218,7 @@ export async function removeTree(root: string, manifest: TreeManifest, identity?
     await verifySurvivor?.()
     if (identity !== undefined) await requireDirectoryIdentity(root, identity)
     if (survivor) await requireDirectoryIdentity(survivor.path, survivor.identity)
-    await reclaimWindowsTree(retiring, retained)
+    await reclaimWindowsTree(retiring, retained, protection?.guards, protection?.failAfter)
 }
 
 /** Removes a tree of plain files and directories, clearing read-only flags. Refuses links. */

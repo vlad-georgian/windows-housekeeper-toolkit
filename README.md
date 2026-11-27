@@ -157,6 +157,22 @@ configured data outside the Windows profile is skipped individually.
    Check which copy contains the latest files, then put a verified copy back
    at the original path. If the original already works, preserve the other
    copies separately until you can account for their contents and ownership.
+
+    For `copying`, the original move source or restore destination is still
+    authoritative. Keep `staging` until you have checked it for later changes.
+    For `swapping`, inspect the actual directories and junctions because the
+    rename may have completed before interruption. Restore service from a
+    complete verified copy, keeping all other copies for comparison.
+
+    For `reclaiming`, the destination should hold the final copy and `original`
+    should be its junction. For `releasing`, `original` should hold the final
+    restored copy. Verify that copy's full contents and permissions. The
+    retiring `aside` or destination may already be partly deleted. Preserve
+    its remainder, compare it with the final copy, and recover any newer or
+    extra files individually before archiving it. A partial tree cannot serve
+    as a complete restore source. If the junction or an ancestor changed,
+    resolve that mismatch before using any recorded path for recovery.
+
 3. After confirming the app can use the expected files at its original path,
    edit the live journal and remove only the object with this record's ID from
    the JSON array. Keep the backup and all other records. If ownership or the
