@@ -17,7 +17,7 @@ export interface DirectoryTransfer {
     readonly appId: string
     readonly original: string
     readonly destination: string
-    /** The relocation base. Emptied mirrored parents below it are removed. */
+    /** The relocation base bounds cleanup of newly created folders when a move is undone. */
     readonly base: string
 }
 
@@ -86,13 +86,10 @@ async function verifyJunction(original: string, destination: string): Promise<vo
     }
 }
 
-/**
- * Removes empty directories from `start` upwards, below `base`. With `createdTop`, stops after
- * that directory so folders that existed before the transfer are kept.
- */
-async function pruneEmptyParents(start: string, base: string, createdTop?: string | null): Promise<void> {
+/** Removes empty destination parents created by the current move, stopping below the base. */
+async function pruneEmptyParents(start: string, base: string, createdTop: string | null): Promise<void> {
     if (createdTop === null) return
-    const withinCreated = (path: string): boolean => createdTop === undefined || canonicalPathKey(path) === canonicalPathKey(createdTop) || isPathInside(path, createdTop)
+    const withinCreated = (path: string): boolean => canonicalPathKey(path) === canonicalPathKey(createdTop) || isPathInside(path, createdTop)
     for (let current = start; isPathInside(current, base) && withinCreated(current); current = dirname(current)) {
         try {
             await rmdir(current)
@@ -157,7 +154,7 @@ async function undoMove(record: RecoveryRecord, transfer: DirectoryTransfer, man
     if (!restored?.isDirectory() || restored.isSymbolicLink()) throw new Error(`${original} could not be put back.`)
     if (await lstatIfPresent(staging)) await removeVerifiedTree(staging)
     if (await lstatIfPresent(destination)) await removeTree(destination, manifest)
-    await pruneEmptyParents(dirname(destination), transfer.base, record.createdParent)
+    await pruneEmptyParents(dirname(destination), transfer.base, record.createdParent ?? null)
 }
 
 /**
@@ -230,8 +227,8 @@ async function undoRestore(record: RecoveryRecord): Promise<void> {
 
 /**
  * Restores the latest contents of a relocated directory to its original path, replacing the
- * junction. The restored copy is verified before destination space is released. Which mirrored
- * parents the original move created is not recorded, so every emptied folder below the base goes.
+ * junction. The restored copy is verified before destination space is released. Parent
+ * directories are kept because their ownership is unknown after a completed move.
  */
 export async function restoreDirectory(transfer: DirectoryTransfer, options: TransferOptions): Promise<TransferResult> {
     const { original, destination } = transfer
@@ -270,7 +267,6 @@ export async function restoreDirectory(transfer: DirectoryTransfer, options: Tra
     try {
         await tracker.enter('releasing')
         await removeTree(destination, manifest)
-        await pruneEmptyParents(dirname(destination), transfer.base)
     } catch (error) {
         throw new IncompleteTransferError(
             `${original} was restored, but the relocated copy at ${destination} was not removed (${errorMessage(error)}). Recovery details are in ${options.journal.location}.`,

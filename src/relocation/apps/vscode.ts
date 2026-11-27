@@ -7,7 +7,7 @@ import type { RelocatableApp } from '../types.ts'
 export function vscodeExtensionsRelocation(paths: SystemPaths): RelocatableApp {
     return {
         id: 'vscode-extensions',
-        appId: 'vscode',
+        processGuardId: 'vscode',
         label: 'Visual Studio Code extensions',
         paths: [{ path: join(paths.home, '.vscode', 'extensions'), description: 'installed extensions' }]
     }

@@ -46,17 +46,33 @@ export const differentVolumes: VolumeComparison = async (first, second) => {
     return statsA.dev !== statsB.dev
 }
 
+/** What kind of drive a root such as `E:\` is. Junctions need a base on a `fixed` drive. */
+export type DriveKind = 'fixed' | 'removable' | 'network' | 'substituted' | 'other'
+
+export type DriveTypeLookup = (root: string) => Promise<DriveKind>
+
+const driveDescriptions: Readonly<Record<Exclude<DriveKind, 'fixed'>, string>> = {
+    removable: 'is a removable drive',
+    network: 'is a network drive',
+    substituted: 'is a substituted drive',
+    other: 'is not a fixed local drive'
+}
+
 export interface BaseValidationOptions {
     readonly home: string
-    /** The original paths that will move under the base. */
+    /** The original paths that will move under the base. Paths already linked are excluded. */
     readonly originals: readonly string[]
     readonly volumesDiffer: VolumeComparison
+    readonly driveType: DriveTypeLookup
 }
 
 /** Returns why `base` cannot hold relocated apps, or `null` when it can. */
-export async function validateRelocationBase(base: string, { home, originals, volumesDiffer }: BaseValidationOptions): Promise<string | null> {
+export async function validateRelocationBase(base: string, { home, originals, volumesDiffer, driveType }: BaseValidationOptions): Promise<string | null> {
     if (!/^[a-z]:[\\/]/i.test(base) || /[*?"<>|]/u.test(base.slice(2))) return 'Enter an absolute path on a local drive, such as E:\\Software.'
     const resolved = resolve(base)
+    const root = parse(resolved).root
+    const kind = await driveType(root)
+    if (kind !== 'fixed') return `${root} ${driveDescriptions[kind]}. Choose a base on a fixed local drive.`
     const key = canonicalPathKey(resolved)
     if (key === canonicalPathKey(home) || isPathInside(resolved, home) || isPathInside(home, resolved)) {
         return 'Choose a base outside the Windows profile.'

@@ -26,7 +26,7 @@ export interface RecoveryRecord {
     /** Where a move sets the original directory aside before linking. */
     readonly aside: string | null
     /** The highest destination parent a move created, so undoing it removes only its own folders. */
-    readonly createdParent: string | null
+    readonly createdParent?: string | null
     readonly phase: TransferPhase
     readonly startedAt: string
 }
@@ -53,7 +53,7 @@ function isRecord(value: unknown): value is RecoveryRecord {
         typeof record.destination === 'string' &&
         typeof record.staging === 'string' &&
         (record.aside === null || typeof record.aside === 'string') &&
-        (record.createdParent === null || typeof record.createdParent === 'string') &&
+        (record.createdParent === undefined || record.createdParent === null || typeof record.createdParent === 'string') &&
         transferPhases.some((phase) => phase === record.phase) &&
         typeof record.startedAt === 'string'
     )

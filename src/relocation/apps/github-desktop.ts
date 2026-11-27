@@ -7,7 +7,7 @@ import type { RelocatableApp } from '../types.ts'
 export function githubDesktopRelocation(paths: SystemPaths): RelocatableApp {
     return {
         id: 'github-desktop',
-        appId: 'github-desktop',
+        processGuardId: 'github-desktop',
         label: 'GitHub Desktop',
         paths: [
             { path: join(paths.localAppData, 'GitHubDesktop'), description: 'installation' },

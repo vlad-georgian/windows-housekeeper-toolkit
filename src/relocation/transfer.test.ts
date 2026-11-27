@@ -177,6 +177,17 @@ describe('moving a directory', () => {
 })
 
 describe('restoring a directory', () => {
+    test('keeps a pre-existing empty parent under the relocation base', async () => {
+        const parent = await sandbox.directory('E/Software/test/AppData/Local')
+        const transfer = { appId: 'github-desktop', original, destination, base }
+        await moveDirectory(transfer, { journal })
+
+        await restoreDirectory(transfer, { journal })
+
+        expect(await pathExists(destination)).toBe(false)
+        expect(await readdir(parent)).toEqual([])
+    })
+
     test('brings the latest contents back and releases the destination after verification', async () => {
         await moveDirectory({ appId: 'github-desktop', original, destination, base }, { journal })
         await writeFile(join(original, 'app-3.4.0', 'settings.json'), 'latest')
@@ -189,7 +200,7 @@ describe('restoring a directory', () => {
         expect(stats.isDirectory()).toBe(true)
         expect(await readFile(join(original, 'app-3.4.0', 'settings.json'), 'utf8')).toBe('latest')
         expect((await stat(join(original, 'app-3.4.0', 'locked.dat'))).mode & 0o200).toBe(0)
-        expect(await pathExists(join(base, 'test'))).toBe(false)
+        expect(await pathExists(destination)).toBe(false)
         expect(await pathExists(base)).toBe(true)
         expect(await siblingsOf(original)).toEqual(['GitHubDesktop', 'Temp'])
         expect(await journal.list()).toEqual([])

@@ -9,6 +9,7 @@ import { createSandbox, type Sandbox } from '../test-support/fixtures.ts'
 import type { WindowsProcess } from '../windows/processes.ts'
 import { createRelocationCatalog } from './apps/index.ts'
 import { createRecoveryJournal, type RecoveryJournal } from './journal.ts'
+import type { VolumeComparison } from './layout.ts'
 import { createRelocationOperation, type RelocationEvent } from './operation.ts'
 import { restoreDirectory } from './transfer.ts'
 
@@ -23,7 +24,7 @@ const desktopData = (): string => join(sandbox.paths.roamingAppData, 'GitHub Des
 const extensions = (): string => join(sandbox.paths.home, '.vscode', 'extensions')
 const mirrored = (original: string): string => join(base, 'test', original.slice(sandbox.paths.home.length + 1))
 
-function operation(dryRun = false): ReturnType<typeof createRelocationOperation> {
+function operation(dryRun = false, volumesDiffer: VolumeComparison = async () => true): ReturnType<typeof createRelocationOperation> {
     return createRelocationOperation({
         home: sandbox.paths.home,
         catalog: createRelocationCatalog(sandbox.paths),
@@ -31,7 +32,8 @@ function operation(dryRun = false): ReturnType<typeof createRelocationOperation>
         dryRun,
         listProcesses: async () => processes,
         // The sandbox lives on one volume; tests treat the base as another drive.
-        volumesDiffer: async () => true,
+        volumesDiffer,
+        driveType: async () => 'fixed',
         report: async (event) => {
             events.push(event)
         }
@@ -119,6 +121,28 @@ describe('moving apps to another drive', () => {
         expect(await readFile(join(mirrored(desktopData()), 'existing.json'), 'utf8')).toBe('keep')
     })
 
+    test('reports a partial move when a later path fails and offers recovery in the checklist', async () => {
+        const prompts = new FakePrompts([['github-desktop'], base])
+        const section = planned(await operation().gather(prompts))
+        const conflict = await sandbox.file('E/Software/test/AppData/Roaming/GitHub Desktop/existing.json', 'keep')
+
+        await section.apply()
+
+        expect(await isLinkTo(desktopInstall(), mirrored(desktopInstall()))).toBe(true)
+        expect((await lstat(desktopData())).isSymbolicLink()).toBe(false)
+        expect(prompts.logs).toContain(`Completed move for ${desktopInstall()}.`)
+        expect(prompts.logs).toContain(`Transfer stopped at ${desktopData()}.`)
+        expect(events).toMatchObject([
+            { kind: 'moved', original: desktopInstall() },
+            { kind: 'failed', original: desktopData(), completed: [desktopInstall()] }
+        ])
+
+        await planned(await operation().gather(new FakePrompts([[]]))).apply()
+        expect((await lstat(desktopInstall())).isSymbolicLink()).toBe(false)
+        expect(await readFile(conflict, 'utf8')).toBe('keep')
+        expect(await journal.list()).toEqual([])
+    })
+
     test('reports an app in use in the plan and skips it if it is still running', async () => {
         processes.push({ id: 1234, name: 'GitHubDesktop.exe', path: null, commandLine: null })
         const section = planned(await operation().gather(new FakePrompts([['github-desktop'], base])))
@@ -129,13 +153,15 @@ describe('moving apps to another drive', () => {
         expect(events).toMatchObject([{ kind: 'skipped', appId: 'github-desktop' }])
     })
 
-    test('counts a partially moved app as not migrated and moves only its remaining paths', async () => {
+    test('finishes relocating a partially migrated application to its existing base', async () => {
         await moveApps(['github-desktop'])
         await restoreDirectory({ appId: 'github-desktop', original: desktopData(), destination: mirrored(desktopData()), base }, { journal })
 
         const prompts = new FakePrompts([['github-desktop'], base])
-        const section = planned(await operation().gather(prompts))
+        const followsLinks = async (_base: string, original: string): Promise<boolean> => !(await realpath(original)).startsWith(base)
+        const section = planned(await operation(false, followsLinks).gather(prompts))
         expect(prompts.checklists[0]?.initialValues).toEqual([])
+        expect(prompts.texts[0]?.initialValue).toBe(base)
         expect(section.lines).toEqual([
             'Move GitHub Desktop to another drive',
             `  ${desktopInstall()} already links to ${mirrored(desktopInstall())}`,
@@ -187,8 +213,27 @@ describe('moving apps to another drive', () => {
     })
 })
 
-describe('restoring moved apps', () => {
-    test('clearing a moved app restores its latest contents and releases the destination', async () => {
+describe('restoring migrated applications', () => {
+    test('leaving a partially restored application clear restores its remaining linked path', async () => {
+        await moveApps(['github-desktop'])
+        await restoreDirectory({ appId: 'github-desktop', original: desktopInstall(), destination: mirrored(desktopInstall()), base }, { journal })
+        await writeFile(join(desktopData(), 'window-state.json'), 'latest')
+        events = []
+
+        const prompts = new FakePrompts([[]])
+        const section = planned(await operation().gather(prompts))
+        expect(prompts.checklists[0]?.initialValues).toEqual([])
+        expect(prompts.checklists[0]?.options[0]?.hint).toContain('Partially migrated')
+        expect(section.lines).toEqual(['Restore GitHub Desktop to its original paths', `  ${mirrored(desktopData())} → ${desktopData()} (6 B)`])
+        await section.apply()
+
+        expect((await lstat(desktopData())).isSymbolicLink()).toBe(false)
+        expect(await readFile(join(desktopData(), 'window-state.json'), 'utf8')).toBe('latest')
+        expect(events).toMatchObject([{ kind: 'restored', original: desktopData() }])
+        expect(await operation().gather(new FakePrompts([[]]))).toBeNull()
+    })
+
+    test('clearing a migrated application restores its latest contents and releases the destination', async () => {
         await moveApps(['github-desktop'])
         await writeFile(join(desktopData(), 'window-state.json'), '{"latest":true}')
         events = []
@@ -205,11 +250,12 @@ describe('restoring moved apps', () => {
 
         expect((await lstat(desktopData())).isSymbolicLink()).toBe(false)
         expect(await readFile(join(desktopData(), 'window-state.json'), 'utf8')).toBe('{"latest":true}')
-        expect(await pathExists(join(base, 'test'))).toBe(false)
+        expect(await pathExists(mirrored(desktopInstall()))).toBe(false)
+        expect(await pathExists(mirrored(desktopData()))).toBe(false)
         expect(events).toMatchObject([{ kind: 'restored' }, { kind: 'restored' }])
     })
 
-    test('reports a moved app that cannot be restored without changing it', async () => {
+    test('reports a migrated application that cannot be restored without changing it', async () => {
         await moveApps(['vscode-extensions'])
         await symlink(await sandbox.directory('Elsewhere'), join(extensions(), 'linked'), 'junction')
         const prompts = new FakePrompts([[]])

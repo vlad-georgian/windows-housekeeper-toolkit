@@ -22,6 +22,8 @@ export interface AppInspection {
     readonly applicable: readonly InspectedPath[]
     /** The base when the app is a migrated application, otherwise `null`. */
     readonly migratedBase: string | null
+    /** The common mirrored base of all non-local paths, if they can be restored together. */
+    readonly restoreBase: string | null
 }
 
 export async function inspectPath(path: string): Promise<PathState> {
@@ -58,10 +60,12 @@ export async function inspectApp(app: RelocatableApp, home: string): Promise<App
     for (const entry of app.paths) inspected.push({ ...entry, state: await inspectPath(entry.path) })
     const applicable = inspected.filter((entry) => entry.state.kind !== 'missing')
 
-    const bases = applicable.map((entry) => (entry.state.kind === 'linked' ? relocationBaseOf(entry.state.target, home, entry.path) : null))
+    const nonLocal = applicable.filter((entry) => entry.state.kind !== 'local')
+    const bases = nonLocal.map((entry) => (entry.state.kind === 'linked' ? relocationBaseOf(entry.state.target, home, entry.path) : null))
     const [first] = bases
-    const migratedBase = first && bases.every((base) => base !== null && canonicalPathKey(base) === canonicalPathKey(first)) && applicable.length > 0 ? first : null
-    return { app, applicable, migratedBase }
+    const restoreBase = first && bases.every((base) => base !== null && canonicalPathKey(base) === canonicalPathKey(first)) ? first : null
+    const migratedBase = nonLocal.length === applicable.length ? restoreBase : null
+    return { app, applicable, migratedBase, restoreBase }
 }
 
 /** What moving one applicable path under `base` involves. */

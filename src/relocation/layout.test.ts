@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { symlink } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, parse } from 'node:path'
 
 import { createSandbox, type Sandbox } from '../test-support/fixtures.ts'
-import { mirroredPath, relocationBaseOf, validateRelocationBase } from './layout.ts'
+import { type DriveKind, mirroredPath, relocationBaseOf, validateRelocationBase } from './layout.ts'
 
 describe('relocation layout', () => {
     test('mirrors a path under the base, profile name, and its profile-relative path', () => {
@@ -26,6 +26,7 @@ describe('relocation layout', () => {
 })
 
 const otherVolume = async (): Promise<boolean> => true
+const fixedDrive = async (): Promise<DriveKind> => 'fixed'
 
 describe('relocation base validation', () => {
     let sandbox: Sandbox
@@ -38,21 +39,52 @@ describe('relocation base validation', () => {
 
     test('accepts an absolute directory outside the profile on another volume', async () => {
         const base = join(sandbox.root, 'E', 'Software')
-        expect(await validateRelocationBase(base, { home: sandbox.paths.home, originals: [original()], volumesDiffer: otherVolume })).toBeNull()
+        expect(await validateRelocationBase(base, { home: sandbox.paths.home, originals: [original()], volumesDiffer: otherVolume, driveType: fixedDrive })).toBeNull()
     })
 
     test('rejects relative, profile, and same-volume bases', async () => {
-        const options = { home: sandbox.paths.home, originals: [original()], volumesDiffer: otherVolume }
+        const options = { home: sandbox.paths.home, originals: [original()], volumesDiffer: otherVolume, driveType: fixedDrive }
         expect(await validateRelocationBase('Software', options)).toContain('absolute')
         expect(await validateRelocationBase(join(sandbox.paths.home, 'Moved'), options)).toContain('outside the Windows profile')
         expect(await validateRelocationBase(join(sandbox.root, 'E'), { ...options, volumesDiffer: async () => false })).toContain('another drive')
     })
 
     test('rejects a base that is a file or reached through a link', async () => {
-        const options = { home: sandbox.paths.home, originals: [original()], volumesDiffer: otherVolume }
+        const options = { home: sandbox.paths.home, originals: [original()], volumesDiffer: otherVolume, driveType: fixedDrive }
         expect(await validateRelocationBase(await sandbox.file('E/file'), options)).toContain('not a directory')
         const real = await sandbox.directory('E/real')
         await symlink(real, join(sandbox.root, 'E', 'linked'), 'junction')
         expect(await validateRelocationBase(join(sandbox.root, 'E', 'linked', 'Software'), options)).toContain('link')
+    })
+})
+
+describe('relocation base drive type', () => {
+    test('requires a fixed local drive for the base', async () => {
+        const sandbox = await createSandbox()
+        try {
+            const base = join(sandbox.root, 'E', 'Software')
+            const queried: string[] = []
+            for (const [kind, message] of [
+                ['removable', 'removable drive'],
+                ['network', 'network drive'],
+                ['substituted', 'substituted drive'],
+                ['other', 'not a fixed local drive']
+            ] as const) {
+                const problem = await validateRelocationBase(base, {
+                    home: sandbox.paths.home,
+                    originals: [join(sandbox.paths.localAppData, 'GitHubDesktop')],
+                    volumesDiffer: otherVolume,
+                    driveType: async (root) => {
+                        queried.push(root)
+                        return kind
+                    }
+                })
+                expect(problem).toContain(message)
+                expect(problem).toContain('fixed local drive')
+            }
+            expect(new Set(queried)).toEqual(new Set([parse(base).root]))
+        } finally {
+            await sandbox.dispose()
+        }
     })
 })

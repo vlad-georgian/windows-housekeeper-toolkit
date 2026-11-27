@@ -2,6 +2,7 @@ import type { CleanupSession } from '../cleanup/operations.ts'
 import { errorMessage } from '../core/format.ts'
 import type { SystemPaths } from '../core/system-paths.ts'
 import type { LaunchOperation } from '../launch/types.ts'
+import { windowsDriveType } from '../windows/drives.ts'
 import { listWindowsProcesses } from '../windows/processes.ts'
 import { createRelocationCatalog } from './apps/index.ts'
 import { createRecoveryJournal } from './journal.ts'
@@ -23,6 +24,7 @@ export function createRelocationLaunchOperation(paths: SystemPaths, session: Cle
         dryRun: session.dryRun,
         listProcesses: listWindowsProcesses,
         volumesDiffer: differentVolumes,
+        driveType: windowsDriveType,
         async report(event) {
             await session.audit.recordRelocation(event.kind, auditDetails(event))
             if (event.kind === 'skipped') session.summary.skippedApps.add(labelOf(event.appId))

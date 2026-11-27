@@ -12,7 +12,7 @@ export interface RelocationPath {
 export interface RelocatableApp {
     readonly id: string
     /** The process guard ID from `src/windows/processes.ts` used to detect the app in use. */
-    readonly appId: string
+    readonly processGuardId: string
     readonly label: string
     readonly paths: readonly RelocationPath[]
 }

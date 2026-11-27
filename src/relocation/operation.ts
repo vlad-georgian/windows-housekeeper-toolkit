@@ -6,8 +6,8 @@ import { cancelled, type Cancelled, type LaunchOperation, type LaunchPrompts, ty
 import { isAppRunning, type WindowsProcess } from '../windows/processes.ts'
 import { type AppInspection, inspectApp, moveSteps } from './inspect.ts'
 import type { RecoveryJournal } from './journal.ts'
-import { validateRelocationBase, type VolumeComparison } from './layout.ts'
-import { moveDirectory, restoreDirectory } from './transfer.ts'
+import { type DriveTypeLookup, validateRelocationBase, type VolumeComparison } from './layout.ts'
+import { IncompleteTransferError, moveDirectory, restoreDirectory, type TransferResult } from './transfer.ts'
 import { measureTree, UnsupportedTreeError } from './tree.ts'
 import type { RelocatableApp } from './types.ts'
 
@@ -16,7 +16,15 @@ export type RelocationEvent =
     | { readonly kind: 'moved' | 'restored'; readonly appId: string; readonly original: string; readonly destination: string; readonly bytes: number }
     | { readonly kind: 'previewed'; readonly appId: string; readonly action: 'move' | 'restore' }
     | { readonly kind: 'skipped'; readonly appId: string; readonly reason: string }
-    | { readonly kind: 'failed'; readonly appId: string; readonly original: string; readonly error: unknown }
+    | {
+          readonly kind: 'failed'
+          readonly appId: string
+          readonly action: 'move' | 'restore'
+          readonly original: string
+          readonly error: unknown
+          readonly completed: readonly string[]
+          readonly notAttempted: readonly string[]
+      }
 
 export interface RelocationOptions {
     readonly home: string
@@ -25,6 +33,7 @@ export interface RelocationOptions {
     readonly dryRun: boolean
     readonly listProcesses: () => Promise<readonly WindowsProcess[]>
     readonly volumesDiffer: VolumeComparison
+    readonly driveType: DriveTypeLookup
     readonly report: (event: RelocationEvent) => Promise<void>
 }
 
@@ -33,7 +42,7 @@ interface PathTransfer {
     readonly destination: string
 }
 
-/** One app's part of the plan: move its local paths under a base, or restore all of them. */
+/** One app's part of the plan: move its local paths under a base, or restore its linked paths. */
 interface AppAction {
     readonly app: RelocatableApp
     readonly action: 'move' | 'restore'
@@ -58,6 +67,7 @@ async function sizeOf(path: string): Promise<{ size: string } | { blocked: strin
 
 async function checklistHint(inspection: AppInspection): Promise<string> {
     if (inspection.migratedBase) return `On ${inspection.migratedBase}`
+    if (inspection.restoreBase) return `Partially migrated to ${inspection.restoreBase}. Check to finish moving, or leave clear to restore.`
     const local = inspection.applicable.filter((entry) => entry.state.kind === 'local')
     let bytes = 0
     for (const entry of local) {
@@ -81,7 +91,7 @@ async function askForBase(prompts: LaunchPrompts, options: RelocationOptions, or
         })
         if (answer === null) return cancelled
         const base = answer.trim()
-        const problem = await validateRelocationBase(base, { home: options.home, originals, volumesDiffer: options.volumesDiffer })
+        const problem = await validateRelocationBase(base, { home: options.home, originals, volumesDiffer: options.volumesDiffer, driveType: options.driveType })
         if (problem === null) return resolve(base)
         prompts.log(problem)
     }
@@ -111,6 +121,7 @@ async function planRestore(inspection: AppInspection, base: string): Promise<App
     const lines = [`Restore ${inspection.app.label} to its original paths`]
     const transfers: PathTransfer[] = []
     for (const entry of inspection.applicable) {
+        if (entry.state.kind === 'local') continue
         if (entry.state.kind !== 'linked') return { blocked: `${entry.path} is not linked` }
         const size = await sizeOf(entry.state.target)
         if ('blocked' in size) return size
@@ -127,29 +138,39 @@ async function applyAction(action: AppAction, prompts: LaunchPrompts, options: R
         await options.report({ kind: 'previewed', appId: app.id, action: action.action })
         return
     }
-    if (isAppRunning(app.appId, await options.listProcesses())) {
+    if (isAppRunning(app.processGuardId, await options.listProcesses())) {
         const reason = `${app.label} is running. Close it and try again.`
         prompts.log(`${reason} Nothing was changed.`)
         await options.report({ kind: 'skipped', appId: app.id, reason })
         return
     }
     const transfer = action.action === 'move' ? moveDirectory : restoreDirectory
-    for (const { original, destination } of action.transfers) {
+    const completed: string[] = []
+    for (const [index, { original, destination }] of action.transfers.entries()) {
+        let result: TransferResult
         try {
-            const result = await transfer({ appId: app.id, original, destination, base: action.base }, { journal: options.journal })
-            await options.report({ kind: action.action === 'move' ? 'moved' : 'restored', appId: app.id, original, destination, bytes: result.bytes })
+            result = await transfer({ appId: app.id, original, destination, base: action.base }, { journal: options.journal })
         } catch (error) {
+            const notAttempted = action.transfers.slice(index + 1).map((entry) => entry.original)
             prompts.log(`${app.label}: ${errorMessage(error)}`)
-            await options.report({ kind: 'failed', appId: app.id, original, error })
+            for (const path of completed) prompts.log(`Completed ${action.action} for ${path}.`)
+            prompts.log(`Transfer stopped at ${original}.`)
+            for (const path of notAttempted) prompts.log(`Did not attempt ${path}.`)
+            if (completed.length > 0 && !(error instanceof IncompleteTransferError)) {
+                prompts.log('Return to the relocation checklist to finish moving or restore the relocated paths after fixing the problem.')
+            }
+            await options.report({ kind: 'failed', appId: app.id, action: action.action, original, error, completed, notAttempted })
             return
         }
+        completed.push(original)
+        await options.report({ kind: action.action === 'move' ? 'moved' : 'restored', appId: app.id, original, destination, bytes: result.bytes })
     }
     prompts.log(action.action === 'move' ? `Moved ${app.label} to ${action.base}.` : `Restored ${app.label} to its original paths.`)
 }
 
 /**
- * The launch-menu operation for application relocation. Migrated apps start checked; checking
- * another app moves it under a base on another drive, and clearing a migrated app restores it.
+ * The launch-menu operation for application relocation. Migrated applications start checked.
+ * Checking an application moves its local paths, and leaving it clear restores its mirrored paths.
  */
 export function createRelocationOperation(options: RelocationOptions): LaunchOperation {
     return {
@@ -178,20 +199,23 @@ export function createRelocationOperation(options: RelocationOptions): LaunchOpe
                 checklistOptions.push({ value: inspection.app.id, label: inspection.app.label, hint: await checklistHint(inspection) })
             }
             const chosen = await prompts.checklist({
-                message: 'Select apps to keep on another drive. Moved apps start checked; clear one to restore it. Press A to toggle all.',
+                message: 'Select apps to keep on another drive. Migrated applications start checked. Leave an app clear to restore its relocated paths. Press A to toggle all.',
                 options: checklistOptions,
                 initialValues: inspections.filter((inspection) => inspection.migratedBase).map((inspection) => inspection.app.id)
             })
             if (chosen === null) return cancelled
             const toMove = inspections.filter((inspection) => chosen.includes(inspection.app.id) && !inspection.migratedBase)
-            const toRestore = inspections.filter((inspection) => !chosen.includes(inspection.app.id) && inspection.migratedBase)
+            const toRestore = inspections.flatMap((inspection) =>
+                inspection.restoreBase && !chosen.includes(inspection.app.id) ? [{ inspection, base: inspection.restoreBase }] : []
+            )
             if (toMove.length === 0 && toRestore.length === 0) return null
 
             const actions: AppAction[] = []
             const lines: string[] = []
             if (toMove.length > 0) {
-                const suggestion = inspections.find((inspection) => inspection.migratedBase)?.migratedBase ?? null
-                const originals = toMove.flatMap((inspection) => inspection.applicable.map((entry) => entry.path))
+                const suggestion =
+                    toMove.find((inspection) => inspection.restoreBase)?.restoreBase ?? inspections.find((inspection) => inspection.migratedBase)?.migratedBase ?? null
+                const originals = toMove.flatMap((inspection) => inspection.applicable.filter((entry) => entry.state.kind === 'local').map((entry) => entry.path))
                 const base = await askForBase(prompts, options, originals, suggestion)
                 if (base === cancelled) return cancelled
                 for (const inspection of toMove) {
@@ -204,8 +228,8 @@ export function createRelocationOperation(options: RelocationOptions): LaunchOpe
                     lines.push(...plan.lines)
                 }
             }
-            for (const inspection of toRestore) {
-                const plan = await planRestore(inspection, inspection.migratedBase ?? '')
+            for (const { inspection, base } of toRestore) {
+                const plan = await planRestore(inspection, base)
                 if ('blocked' in plan) {
                     prompts.log(`${inspection.app.label} cannot be restored: ${plan.blocked}.`)
                     continue
@@ -217,7 +241,7 @@ export function createRelocationOperation(options: RelocationOptions): LaunchOpe
 
             const processes = await options.listProcesses()
             for (const action of actions) {
-                if (isAppRunning(action.app.appId, processes)) lines.push(`${action.app.label} is running. Close it before applying, or it will be skipped.`)
+                if (isAppRunning(action.app.processGuardId, processes)) lines.push(`${action.app.label} is running. Close it before applying, or it will be skipped.`)
             }
             return {
                 title,

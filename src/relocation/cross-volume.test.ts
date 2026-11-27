@@ -6,6 +6,7 @@ import { pathExists } from '../core/filesystem/index.ts'
 import { cancelled, type PlanSection } from '../launch/types.ts'
 import { FakePrompts } from '../test-support/fake-prompts.ts'
 import { createSandbox, type Sandbox } from '../test-support/fixtures.ts'
+import { windowsDriveType } from '../windows/drives.ts'
 import { createRelocationCatalog } from './apps/index.ts'
 import { createRecoveryJournal } from './journal.ts'
 import { differentVolumes } from './layout.ts'
@@ -33,6 +34,7 @@ function operation(): ReturnType<typeof createRelocationOperation> {
         dryRun: false,
         listProcesses: async () => [],
         volumesDiffer: differentVolumes,
+        driveType: windowsDriveType,
         report: async () => {}
     })
 }
@@ -64,12 +66,26 @@ describe.skipIf(!otherVolume)('relocation across local volumes', () => {
 
         expect((await lstat(original)).isSymbolicLink()).toBe(false)
         expect(await readFile(join(original, 'publisher.extension-1.0.0', 'package.json'), 'utf8')).toBe('{"version":"1.0.1"}')
-        expect(await pathExists(join(base, 'test'))).toBe(false)
+        expect(await pathExists(destination)).toBe(false)
     })
 
     test('rejects a base on the same volume as the original paths', async () => {
         const prompts = new FakePrompts([['vscode-extensions'], join(sandbox.root, 'Software'), join(destinationRoot, 'Software')])
         planned(await operation().gather(prompts))
         expect(prompts.logs.some((message) => message.includes('another drive'))).toBe(true)
+    })
+
+    test('finishes relocating an application to its existing base across volumes', async () => {
+        const base = join(destinationRoot, 'Software')
+        const install = join(sandbox.paths.localAppData, 'GitHubDesktop')
+        await sandbox.file('Users/test/AppData/Local/GitHubDesktop/Update.exe', 'updater')
+        await planned(await operation().gather(new FakePrompts([['github-desktop'], base]))).apply()
+
+        const data = join(sandbox.paths.roamingAppData, 'GitHub Desktop')
+        await sandbox.file('Users/test/AppData/Roaming/GitHub Desktop/window-state.json', '{}')
+        await planned(await operation().gather(new FakePrompts([['github-desktop'], base]))).apply()
+
+        expect(await realpath(install)).toBe(join(base, 'test', 'AppData', 'Local', 'GitHubDesktop'))
+        expect(await realpath(data)).toBe(join(base, 'test', 'AppData', 'Roaming', 'GitHub Desktop'))
     })
 })
