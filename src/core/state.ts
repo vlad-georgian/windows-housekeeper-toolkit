@@ -40,6 +40,14 @@ export async function writeState(paths: SystemPaths, name: string, value: unknow
 
 export async function withRunLock<T>(paths: SystemPaths, operation: () => Promise<T>): Promise<T> {
     const identity = createHash('sha256').update(stateDirectory(paths).toLowerCase()).digest('hex')
+    return withPipeLock(identity, operation)
+}
+
+export function withServiceStartupLock<T>(operation: () => Promise<T>): Promise<T> {
+    return withPipeLock('app-service-startup', operation)
+}
+
+async function withPipeLock<T>(identity: string, operation: () => Promise<T>): Promise<T> {
     const pipe = '\\\\.\\pipe\\' + projectName + '-' + identity
     const server = createServer((connection) => connection.destroy())
     try {
@@ -58,6 +66,6 @@ export async function withRunLock<T>(paths: SystemPaths, operation: () => Promis
     try {
         return await operation()
     } finally {
-        server.close()
+        await new Promise<void>((resolve) => server.close(() => resolve()))
     }
 }
