@@ -129,6 +129,23 @@ the apps before applying, or they are skipped. If a transfer leaves a recovery
 record, the CLI holds back that application and points to
 `%LOCALAPPDATA%\windows-housekeeper-toolkit\relocation-recovery.json`.
 
+### Recovering an interrupted relocation
+
+1. Close the affected app and its background processes. Back up the journal,
+   find the reported record ID, and preserve the data at its `original`,
+   `destination`, `staging`, and `aside` paths. A phase tells you where the
+   operation stopped. Verify each copy and junction before moving any files.
+2. If the original path is missing, look for the intact original at `aside`
+   during a move, or for the verified copy at `staging` during a restore.
+   Check which copy contains the latest files, then put a verified copy back
+   at the original path. If the original already works, preserve the other
+   copies separately until you can account for their contents and ownership.
+3. After confirming the app can use the expected files at its original path,
+   edit the live journal and remove only the object with this record's ID from
+   the JSON array. Keep the backup and all other records. If ownership or the
+   latest copy is unclear, leave the record and copies in place until you can
+   verify them.
+
 ### Reverting a legacy Codex diagnostic-log move
 
 If you previously ran `migration move codex-logs`, close Codex, ChatGPT, and

@@ -7,6 +7,7 @@
 | [`app-inventory-script.ts`](../../src/windows/app-inventory-script.ts) | Queries Windows for installed executables, package manifests, packaged startup tasks, and services tied to known apps.                            |
 | [`powershell.ts`](../../src/windows/powershell.ts)                     | Runs Windows PowerShell with UTF-8 JSON input, captured output, optional timeouts, and a hidden child window.                                     |
 | [`processes.ts`](../../src/windows/processes.ts)                       | Reads Windows processes and maps known names and executable paths to cleaner IDs.                                                                 |
+| [`drives.ts`](../../src/windows/drives.ts)                             | Classifies Windows drive roots and identifies substituted drives.                                                                                 |
 | [`signin.ts`](../../src/windows/signin.ts)                             | Validates sign-in settings and cleaner eligibility. It inspects, registers, or removes the per-user task.                                         |
 | [`notification.ts`](../../src/windows/notification.ts)                 | Registers the notification identity, sends the Windows toast, and verifies the audit log path before opening it.                                  |
 | [`app-startup/`](../../src/windows/app-startup)                        | Startup inventory and reversible per-user preferences.                                                                                            |
