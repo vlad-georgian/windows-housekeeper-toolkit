@@ -38,9 +38,10 @@ Temporary Internet Files cache. Each is one candidate whose contents go
 regardless of age while the folder stays. Removal is in
 [`temporary-contents.ts`](../../src/core/filesystem/temporary-contents.ts): it
 removes links without following them, and reports locked or inaccessible
-entries through `onSkipped` while siblings continue. Skips reach the summary and
-the audit log's `entry-skipped` records. A `TEMP` outside the user profile, or
-one that contains the profile, is not offered.
+entries through `onSkipped` while siblings continue. The active audit log, passed as a protected path, is kept even when the log directory is inside the cleaned root. Skips reach the summary and
+the audit log's `entry-skipped` records. Only `<LocalAppData>\Temp` and folders inside it, and
+`<LocalAppData>\Microsoft\Windows\INetCache`, are offered. A `TEMP` pointing
+anywhere else, even inside the profile, is not.
 
 Unattended runs need explicit `--category` names, and destructive caches run
 only when `destructive-cache` is named. Windows temporary directories run only
