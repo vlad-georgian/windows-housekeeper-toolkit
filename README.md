@@ -14,27 +14,40 @@ vp run scan
 vp run start --help
 ```
 
-Run `vp run start` to choose applications interactively. The CLI announces the
-scan before showing the menu. Use the arrow keys to move, **Space** to toggle
-each app, **A** to toggle all, and **Enter** to confirm. Close the selected apps
-before removal.
+Run `vp run start` to open the launch menu. Every choice starts unchecked. Use
+the arrow keys to move, **Space** to toggle an item, **A** to toggle all, and
+**Enter** to confirm. **Remove caches** opens the general cache checklist, then
+a separate checklist of package download caches that shows the redownload and
+offline-use implications. **Remove old data and installations** lists apps with
+superseded releases or installer payloads. The CLI gathers every choice, then
+shows one combined plan to confirm. Cancelling any prompt applies nothing.
+Close the selected apps before removal.
+
+For an unattended run, name each cleanup category with `--category`:
+`general-cache`, `destructive-cache`, or `old-installations`. Destructive caches
+run only when their category is named.
 
 ```powershell
-vp run start --dry-run --app codex
-vp run start --app vscode
-vp run start --all --log-dir D:\cleanup-logs
+vp run start --dry-run
+vp run start --dry-run --category general-cache
+vp run start --category general-cache --category old-installations
+vp run start --category destructive-cache --log-dir D:\cleanup-logs
 ```
 
 Dry runs show the candidate path, reason, and known space by storage drive.
 The CLI checks resolved paths and counts aliases once. It preserves worktrees,
-conversations, generated files, settings, credentials, installed plugins, and
-active versions. NVIDIA Driver Store removal is manual and requires elevation.
+conversations, generated files, settings, credentials, installed plugins,
+installed packages, pending updates, and active versions. NVIDIA Driver Store
+removal is manual and requires elevation.
 
-The catalog includes Codex's independently selected standalone and daemon
-releases, supported Claude Code binaries and Claude Desktop caches, VS Code
-caches, verified OpenCode Desktop installer payloads, and the existing
-application and package-cache cleaners. The default manual audit directory is
-`./logs`. Each file is named `windows-housekeeper-toolkit-<timestamp>-<pid>.log`.
+General cache cleanup covers Codex, Claude Code, Claude Desktop, Discord,
+GitHub Desktop, and VS Code caches. Destructive cache cleanup covers per-user
+npm, Bun, Scoop, Chocolatey, and NuGet download caches. Old-installation cleanup
+keeps only the selected release in each Codex release store and any staged
+update, and covers superseded Claude Code binaries, Squirrel desktop apps such
+as GitHub Desktop and Discord, and updater payloads for installed updates. The
+default manual audit directory is `./logs`. Each file is named
+`windows-housekeeper-toolkit-<timestamp>-<pid>.log`.
 
 ## App startup and updates
 
@@ -63,14 +76,16 @@ the CLI can disable while preserving in-app updates.
 
 ## Windows sign-in
 
-Cleanup and startup preference enforcement have independent switches. Cleanup
-requires an explicit list of eligible cleaner IDs. It skips running apps and
-posts one Windows notification with the outcome and an audit log link. Sign-in
-logs and preferences live under `%LOCALAPPDATA%\windows-housekeeper-toolkit`.
+Cleanup and startup preference enforcement have independent switches. Sign-in
+cleanup runs only general cache cleanup and requires an explicit list of its
+cleaner IDs. Saved selections from other categories stay saved but are
+excluded, and `signin status` lists them. It skips running apps and posts one
+Windows notification with the outcome and an audit log link. Sign-in logs and
+preferences live under `%LOCALAPPDATA%\windows-housekeeper-toolkit`.
 
 ```powershell
 vp run start signin status
-vp run start signin cleanup enable --apps vscode,opencode
+vp run start signin cleanup enable --apps vscode,codex
 vp run start signin enforcement enable
 vp run start signin cleanup disable
 vp run start signin enforcement disable

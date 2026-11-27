@@ -2,14 +2,14 @@
 
 | File or directory                                             | Responsibility                                                                                                                             |
 | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`types.ts`](../../src/core/types.ts)                         | Defines cleaners, candidates, filesystem identities, removal callbacks, and command results.                                               |
-| [`cli-options.ts`](../../src/core/cli-options.ts)             | Declares the manual cleanup grammar, including mutually exclusive `--app` and `--all`, and configures help and completion.                 |
+| [`types.ts`](../../src/core/types.ts)                         | Defines cleanup categories, cleaners, candidates, filesystem identities, removal callbacks, and command results.                           |
+| [`cli-options.ts`](../../src/core/cli-options.ts)             | Declares the cleanup grammar, including repeatable `--category` for unattended runs, and configures help and completion.                   |
 | [`audit-logger.ts`](../../src/core/audit-logger.ts)           | Appends JSON Lines records for detections, previews, removals, skips, errors, and summaries.                                               |
 | [`command.ts`](../../src/core/command.ts)                     | Executes subprocesses through Bun and captures output and exit status.                                                                     |
 | [`format.ts`](../../src/core/format.ts)                       | Formats byte counts and errors and sums known sizes.                                                                                       |
 | [`versions.ts`](../../src/core/versions.ts)                   | Compares numeric version components for release and driver cleaners.                                                                       |
 | [`state.ts`](../../src/core/state.ts)                         | Resolves the state directory, reads and replaces JSON state, and implements the named-pipe lock. Callers validate their own saved schemas. |
-| [`system-paths.ts`](../../src/core/system-paths.ts)           | Resolves the Windows profile, AppData, ProgramData, and system drive.                                                                      |
+| [`system-paths.ts`](../../src/core/system-paths.ts)           | Resolves the Windows profile, AppData, Temp, ProgramData, and system drive.                                                                |
 | [`filesystem/`](../../src/core/filesystem)                    | Shared validation, measurement, and removal for filesystem candidates.                                                                     |
 | [`filesystem/index.ts`](../../src/core/filesystem/index.ts)   | Exposes filesystem operations to callers.                                                                                                  |
 | [`filesystem/paths.ts`](../../src/core/filesystem/paths.ts)   | Checks containment, resolved paths, identities, and hardlink groups. Also lists directories and reads small verified text files.           |
