@@ -1,15 +1,15 @@
-import { lstat, realpath } from "node:fs/promises";
-import { basename, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { lstat, realpath } from 'node:fs/promises'
+import { basename, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-import { runCommand } from "../core/command.ts";
-import { projectName, stateDirectory } from "../core/state.ts";
-import type { SystemPaths } from "../core/system-paths.ts";
-import { runPowerShell } from "./powershell.ts";
+import { runCommand } from '../core/command.ts'
+import { projectName, stateDirectory } from '../core/state.ts'
+import type { SystemPaths } from '../core/system-paths.ts'
+import { runPowerShell } from './powershell.ts'
 
-const appId = "George.WindowsCleanup";
-const logName = /^windows-housekeeper-toolkit-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-\d+\.log$/;
-const entrypoint = fileURLToPath(new URL("../index.ts", import.meta.url));
+const appId = 'George.WindowsCleanup'
+const logName = /^windows-housekeeper-toolkit-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-\d+\.log$/
+const entrypoint = fileURLToPath(new URL('../index.ts', import.meta.url))
 
 const shortcutProperties = `
 using System;
@@ -68,11 +68,11 @@ public static class NotificationShortcut {
         }
     }
 }
-`;
+`
 
 export async function registerNotificationIdentity(paths: SystemPaths): Promise<void> {
-    const logs = join(stateDirectory(paths), "logs");
-    const command = `"${process.execPath}" run "${entrypoint}" notification-log "%1"`;
+    const logs = join(stateDirectory(paths), 'logs')
+    const command = `"${process.execPath}" run "${entrypoint}" notification-log "%1"`
     await runPowerShell(
         `
       Add-Type -TypeDefinition $data.source
@@ -102,14 +102,14 @@ export async function registerNotificationIdentity(paths: SystemPaths): Promise<
             logs,
             name: projectName,
             command,
-            explorer: join(paths.systemRoot, "explorer.exe"),
-        },
-    );
+            explorer: join(paths.systemRoot, 'explorer.exe')
+        }
+    )
 }
 
 export async function sendCleanupNotification(summary: string, logPath: string): Promise<void> {
-    const name = basename(logPath);
-    if (!logName.test(name)) throw new Error("Invalid cleanup notification log name.");
+    const name = basename(logPath)
+    if (!logName.test(name)) throw new Error('Invalid cleanup notification log name.')
     await runPowerShell(
         `
       $null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime]
@@ -125,24 +125,18 @@ export async function sendCleanupNotification(summary: string, logPath: string):
       if ($notifier.Setting.ToString() -ne 'Enabled') { throw "Windows notifications are $($notifier.Setting)." }
       $notifier.Show([Windows.UI.Notifications.ToastNotification, Windows.UI.Notifications, ContentType=WindowsRuntime]::new($xml))
     `,
-        { appId, uri: `${projectName}://audit/${name}`, title: projectName, summary },
-    );
+        { appId, uri: `${projectName}://audit/${name}`, title: projectName, summary }
+    )
 }
 
-export async function openNotificationLog(
-    paths: SystemPaths,
-    args: readonly string[],
-): Promise<void> {
-    const uri = args[0];
-    const prefix = `${projectName}://audit/`;
-    const filename = uri?.startsWith(prefix) ? uri.slice(prefix.length) : "";
-    if (args.length !== 1 || !logName.test(filename)) throw new Error("Invalid audit log link.");
-    const path = join(stateDirectory(paths), "logs", filename);
-    if (
-        !(await lstat(path)).isFile() ||
-        (await realpath(path)).toLowerCase() !== path.toLowerCase()
-    ) {
-        throw new Error("The audit log no longer resolves to its original location.");
+export async function openNotificationLog(paths: SystemPaths, args: readonly string[]): Promise<void> {
+    const uri = args[0]
+    const prefix = `${projectName}://audit/`
+    const filename = uri?.startsWith(prefix) ? uri.slice(prefix.length) : ''
+    if (args.length !== 1 || !logName.test(filename)) throw new Error('Invalid audit log link.')
+    const path = join(stateDirectory(paths), 'logs', filename)
+    if (!(await lstat(path)).isFile() || (await realpath(path)).toLowerCase() !== path.toLowerCase()) {
+        throw new Error('The audit log no longer resolves to its original location.')
     }
-    await runCommand([join(paths.systemRoot, "System32", "notepad.exe"), path]);
+    await runCommand([join(paths.systemRoot, 'System32', 'notepad.exe'), path])
 }

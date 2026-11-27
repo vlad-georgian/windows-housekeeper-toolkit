@@ -1,30 +1,21 @@
-import {
-    type AppId,
-    type AppInventory,
-    isAppId,
-    isArrayOf,
-    isRecord,
-    isString,
-    parseInventoryResult,
-    scheduledTaskScript,
-} from "../app-catalog.ts";
-import { runPowerShell } from "../powershell.ts";
-import { directTargetScript } from "./registry.ts";
+import { type AppId, type AppInventory, isAppId, isArrayOf, isRecord, isString, parseInventoryResult, scheduledTaskScript } from '../app-catalog.ts'
+import { runPowerShell } from '../powershell.ts'
+import { directTargetScript } from './registry.ts'
 
 interface StartupEntry {
-    app: AppId;
-    name: string;
-    source: string;
-    state: string;
-    target: string;
-    command: string;
-    valueKind: string;
-    supported: boolean;
+    app: AppId
+    name: string
+    source: string
+    state: string
+    target: string
+    command: string
+    valueKind: string
+    supported: boolean
 }
 
 interface StartupInventory {
-    entries: StartupEntry[];
-    warnings: string[];
+    entries: StartupEntry[]
+    warnings: string[]
 }
 
 function isStartupEntry(value: unknown): value is StartupEntry {
@@ -37,16 +28,12 @@ function isStartupEntry(value: unknown): value is StartupEntry {
         isString(value.target) &&
         isString(value.command) &&
         isString(value.valueKind) &&
-        typeof value.supported === "boolean"
-    );
+        typeof value.supported === 'boolean'
+    )
 }
 
 function isStartupInventory(value: unknown): value is StartupInventory {
-    return (
-        isRecord(value) &&
-        isArrayOf(value.entries, isStartupEntry) &&
-        isArrayOf(value.warnings, isString)
-    );
+    return isRecord(value) && isArrayOf(value.entries, isStartupEntry) && isArrayOf(value.warnings, isString)
 }
 
 export async function getStartupEntries(inventory: AppInventory): Promise<StartupInventory> {
@@ -112,14 +99,12 @@ export async function getStartupEntries(inventory: AppInventory): Promise<Startu
     [pscustomobject]@{ entries = $entries; warnings = $warnings } | ConvertTo-Json -Depth 5 -Compress
   `,
         { installs: inventory.installs },
-        10_000,
-    );
-    return parseInventoryResult(output, isStartupInventory);
+        10_000
+    )
+    return parseInventoryResult(output, isStartupInventory)
 }
 
-export async function getScheduledStartupEntries(
-    inventory: AppInventory,
-): Promise<StartupInventory> {
+export async function getScheduledStartupEntries(inventory: AppInventory): Promise<StartupInventory> {
     try {
         const output = await runPowerShell(
             String.raw`
@@ -146,15 +131,13 @@ export async function getScheduledStartupEntries(
       [pscustomobject]@{ entries = $entries; warnings = @($warnings | Select-Object -Unique) } | ConvertTo-Json -Depth 5 -Compress
     `,
             { installs: inventory.installs },
-            10_000,
-        );
-        return parseInventoryResult(output, isStartupInventory);
+            10_000
+        )
+        return parseInventoryResult(output, isStartupInventory)
     } catch (error) {
         return {
             entries: [],
-            warnings: [
-                `Could not inspect scheduled logon tasks: ${error instanceof Error ? error.message : String(error)}`,
-            ],
-        };
+            warnings: [`Could not inspect scheduled logon tasks: ${error instanceof Error ? error.message : String(error)}`]
+        }
     }
 }

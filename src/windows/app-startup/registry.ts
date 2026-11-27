@@ -1,6 +1,6 @@
-import type { AppInventory } from "../app-catalog.ts";
-import { runPowerShell } from "../powershell.ts";
-import type { StartupPreference } from "./preferences.ts";
+import type { AppInventory } from '../app-catalog.ts'
+import { runPowerShell } from '../powershell.ts'
+import type { StartupPreference } from './preferences.ts'
 
 export const directTargetScript = String.raw`
   function Get-DirectTarget([string] $command) {
@@ -19,14 +19,10 @@ export const directTargetScript = String.raw`
     }
     $true
   }
-`;
+`
 
-export async function changeRunValue(
-    inventory: AppInventory,
-    preference: StartupPreference,
-    restore: boolean,
-): Promise<"changed" | "unchanged"> {
-    const installs = inventory.installs.filter((install) => install.id === preference.app);
+export async function changeRunValue(inventory: AppInventory, preference: StartupPreference, restore: boolean): Promise<'changed' | 'unchanged'> {
+    const installs = inventory.installs.filter((install) => install.id === preference.app)
     const output = await runPowerShell(
         String.raw`
     ${directTargetScript}
@@ -65,9 +61,8 @@ export async function changeRunValue(
       'changed'
     } finally { if ($null -ne $key) { $key.Close() } }
   `,
-        { preference, restore, installPaths: installs.map((install) => install.path) },
-    );
-    if (output !== "changed" && output !== "unchanged")
-        throw new Error("Unexpected startup change result.");
-    return output;
+        { preference, restore, installPaths: installs.map((install) => install.path) }
+    )
+    if (output !== 'changed' && output !== 'unchanged') throw new Error('Unexpected startup change result.')
+    return output
 }

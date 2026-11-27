@@ -1,25 +1,14 @@
-import {
-    type AppInventory,
-    isArrayOf,
-    isRecord,
-    isString,
-    parseInventoryResult,
-} from "../app-catalog.ts";
-import { runPowerShell } from "../powershell.ts";
+import { type AppInventory, isArrayOf, isRecord, isString, parseInventoryResult } from '../app-catalog.ts'
+import { runPowerShell } from '../powershell.ts'
 
 interface AppInstallerStatus {
-    package: string;
-    state: string;
-    manageable: boolean;
+    package: string
+    state: string
+    manageable: boolean
 }
 
 function isAppInstallerStatus(value: unknown): value is AppInstallerStatus {
-    return (
-        isRecord(value) &&
-        isString(value.package) &&
-        isString(value.state) &&
-        typeof value.manageable === "boolean"
-    );
+    return isRecord(value) && isString(value.package) && isString(value.state) && typeof value.manageable === 'boolean'
 }
 
 // Cmdlet signatures differ across Windows releases. Only allow a setter that accepts
@@ -85,15 +74,11 @@ const appInstallerScript = String.raw`
     })
     if ($sets.Count -ne 1) { return 'Windows does not expose a background-only Appx setting' }
   }
-`;
+`
 
-export async function getAppInstallerStatus(
-    inventory: AppInventory,
-): Promise<AppInstallerStatus[]> {
-    const packages = inventory.packages.filter(
-        (item) => item.registered && item.signature !== "Store",
-    );
-    if (packages.length === 0) return [];
+export async function getAppInstallerStatus(inventory: AppInventory): Promise<AppInstallerStatus[]> {
+    const packages = inventory.packages.filter((item) => item.registered && item.signature !== 'Store')
+    if (packages.length === 0) return []
     try {
         const output = await runPowerShell(
             String.raw`
@@ -120,22 +105,20 @@ export async function getAppInstallerStatus(
     ConvertTo-Json -InputObject $results -Depth 4 -Compress
   `,
             { packages },
-            10_000,
-        );
-        return parseInventoryResult(output, (value) => isArrayOf(value, isAppInstallerStatus));
+            10_000
+        )
+        return parseInventoryResult(output, (value) => isArrayOf(value, isAppInstallerStatus))
     } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
+        const detail = error instanceof Error ? error.message : String(error)
         return packages.map((item) => ({
             package: item.fullName,
             state: `App Installer mechanism unverified: ${detail}`,
-            manageable: false,
-        }));
+            manageable: false
+        }))
     }
 }
 
-export async function disablePackageBackgroundUpdates(
-    selected: AppInventory["packages"][number],
-): Promise<"already-off" | "disabled"> {
+export async function disablePackageBackgroundUpdates(selected: AppInventory['packages'][number]): Promise<'already-off' | 'disabled'> {
     const output = await runPowerShell(
         String.raw`
     ${appInstallerScript}
@@ -177,11 +160,10 @@ export async function disablePackageBackgroundUpdates(
         {
             family: selected.family,
             fullName: selected.fullName,
-            name: selected.fullName.split("_")[0],
-        },
-    );
-    if (output !== "already-off" && output !== "disabled")
-        throw new Error("Unexpected App Installer settings result.");
+            name: selected.fullName.split('_')[0]
+        }
+    )
+    if (output !== 'already-off' && output !== 'disabled') throw new Error('Unexpected App Installer settings result.')
 
-    return output;
+    return output
 }
