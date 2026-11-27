@@ -91,6 +91,15 @@ changes until you confirm. It uses the same saved preferences as
 `startup disable` and `startup restore`, and does not change the sign-in
 enforcement switch.
 
+From an elevated terminal, **Manage automatic startup** also offers the verified
+`CoworkVMService` (Claude) and `CodexSandboxService.OpenAI.Codex` (Codex) when
+their registered app package and service executable match and Windows grants
+permission to configure the service. These selections are machine-wide.
+Turning off automatic startup changes an automatic service to
+**Manual** and leaves its running state alone. Windows or the app can still
+start it on demand. Restore from the same menu and administrator profile to
+recover the exact saved mode, including **Automatic (Delayed Start)**.
+
 ## Windows sign-in
 
 Cleanup and startup preference enforcement have independent switches. Sign-in

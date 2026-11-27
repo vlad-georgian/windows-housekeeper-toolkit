@@ -79,10 +79,15 @@ export interface AppInventory {
     warnings: string[]
 }
 
-const packageIdentities = [
+export const packageIdentities = [
     { id: 'codex', name: 'OpenAI.Codex', family: 'OpenAI.Codex_2p2nqsd0c76g0' },
     { id: 'claude', name: 'Claude', family: 'Claude_pzs8sxrjxfjjc' }
-]
+] as const
+
+export const appServiceIdentities = [
+    { id: 'codex', name: 'CodexSandboxService.OpenAI.Codex', file: 'codex-windows-sandbox-service.exe', signer: 'OpenAI OpCo, LLC' },
+    { id: 'claude', name: 'CoworkVMService', file: 'cowork-svc.exe', signer: 'Anthropic, PBC' }
+] as const
 
 function isInstallation(value: unknown): value is Installation {
     return isRecord(value) && isAppId(value.id) && isString(value.type) && isString(value.path)
@@ -157,14 +162,7 @@ export async function getAppInventory(paths: SystemPaths): Promise<AppInventory>
         installs,
         npmPackage: join(npm, 'package.json'),
         packages: packageIdentities,
-        services: [
-            {
-                id: 'codex',
-                name: 'CodexSandboxService.OpenAI.Codex',
-                file: 'codex-windows-sandbox-service.exe'
-            },
-            { id: 'claude', name: 'CoworkVMService', file: 'cowork-svc.exe' }
-        ]
+        services: appServiceIdentities
     }
     const output = await runPowerShell(appInventoryScript, data)
     return parseInventoryResult(output, isInventory)

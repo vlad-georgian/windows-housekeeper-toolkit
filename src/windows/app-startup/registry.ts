@@ -2,14 +2,7 @@ import type { AppInventory } from '../app-catalog.ts'
 import { runPowerShell } from '../powershell.ts'
 import type { StartupPreference } from './preferences.ts'
 
-export const directTargetScript = String.raw`
-  function Get-DirectTarget([string] $command) {
-    if ($command -match '^\s*"([^"\r\n]+)"(?:\s|$)') { $target = $Matches[1] }
-    elseif ($command -match '^\s*([^\s"]+)(?:\s|$)') { $target = $Matches[1] }
-    else { return }
-    if ($target -notmatch '^[A-Z]:\\[^\r\n]*\.exe$') { return }
-    [IO.Path]::GetFullPath($target)
-  }
+export const unlinkedExecutableScript = String.raw`
   function Test-UnlinkedExecutable([string] $target) {
     $item = Get-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
     if ($null -eq $item -or $item.PSIsContainer) { return $false }
@@ -19,6 +12,17 @@ export const directTargetScript = String.raw`
     }
     $true
   }
+`
+
+export const directTargetScript = String.raw`
+  function Get-DirectTarget([string] $command) {
+    if ($command -match '^\s*"([^"\r\n]+)"(?:\s|$)') { $target = $Matches[1] }
+    elseif ($command -match '^\s*([^\s"]+)(?:\s|$)') { $target = $Matches[1] }
+    else { return }
+    if ($target -notmatch '^[A-Z]:\\[^\r\n]*\.exe$') { return }
+    [IO.Path]::GetFullPath($target)
+  }
+  ${unlinkedExecutableScript}
 `
 
 export async function changeRunValue(inventory: AppInventory, preference: StartupPreference, restore: boolean): Promise<'changed' | 'unchanged'> {
