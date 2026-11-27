@@ -12,10 +12,15 @@
 | [`system-paths.ts`](../../src/core/system-paths.ts)                                   | Resolves the Windows profile, AppData, Temp, ProgramData, and system drive.                                                                                                                                  |
 | [`filesystem/`](../../src/core/filesystem)                                            | Shared validation, measurement, and removal for filesystem candidates.                                                                                                                                       |
 | [`filesystem/index.ts`](../../src/core/filesystem/index.ts)                           | Exposes filesystem operations to callers.                                                                                                                                                                    |
-| [`filesystem/paths.ts`](../../src/core/filesystem/paths.ts)                           | Checks containment, resolved paths, identities, and hardlink groups. Also lists directories and reads small verified text files.                                                                             |
+| [`filesystem/paths.ts`](../../src/core/filesystem/paths.ts)                           | Checks containment, resolved paths, identities, and hardlink groups. Also lists directories and reads small verified text files, with a larger limit for metadata files that can grow.                                                                             |
 | [`filesystem/detect.ts`](../../src/core/filesystem/detect.ts)                         | Measures a proposed target and builds a candidate with its detection-time identity.                                                                                                                          |
 | [`filesystem/temporary-contents.ts`](../../src/core/filesystem/temporary-contents.ts) | Offers and empties a temporary directory while keeping it. Accepts only an allowlisted location, removes links without following them, skips locked entries and the active audit log, and reports each skip. |
 | [`filesystem/remove.ts`](../../src/core/filesystem/remove.ts)                         | Revalidates candidates and directory trees, counts hardlinked bytes on the final unlink, and calls the audit callback per entry.                                                                             |
+
+A cleaner can set `unlinkTreeLinks` on a candidate whose verified release tree
+contains links or hardlinked files, such as a pnpm install. Measurement and
+removal then unlink those entries without following them. See
+[ADR 0003](../adr/0003-unlink-links-inside-verified-release-trees.md).
 
 A cleaner supplies an allowed root for each candidate. Filesystem
 verification checks containment and rejects unexpected redirects and

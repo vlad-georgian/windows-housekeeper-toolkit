@@ -4,7 +4,17 @@ import { resolve } from 'node:path'
 
 import type { CleanupCandidate, RemovalCallbacks, RemovalResult } from '../types.ts'
 import { measurePath } from './detect.ts'
-import { canonicalPathKey, entryIdentity, hasErrorCode, hasIdentity, inspectCanonicalEntry, resolveTarget, resolveTargetGroup, UnverifiedPathError } from './paths.ts'
+import {
+    canonicalPathKey,
+    entryIdentity,
+    hasErrorCode,
+    hasIdentity,
+    inspectCanonicalEntry,
+    inspectTreeEntry,
+    resolveTarget,
+    resolveTargetGroup,
+    UnverifiedPathError
+} from './paths.ts'
 
 async function unlinkWithReadonlyFallback(path: string, stats: BigIntStats): Promise<void> {
     try {
@@ -31,7 +41,18 @@ async function removeFile(path: string, stats: BigIntStats, callbacks: RemovalCa
     return bytes
 }
 
-async function removePathRecursively(path: string, stats: BigIntStats, callbacks: RemovalCallbacks): Promise<{ entries: number; bytes: number }> {
+/** Removes a link entry itself. Windows junctions and directory links need rmdir; the target is never opened. */
+async function removeLink(path: string, stats: BigIntStats, callbacks: RemovalCallbacks): Promise<void> {
+    try {
+        await unlink(path)
+    } catch (error) {
+        if (!hasErrorCode(error, 'EISDIR', 'EPERM')) throw error
+        await rmdir(path)
+    }
+    await callbacks.onRemoved({ kind: 'link', path, sizeBytes: 0, modifiedAt: stats.mtime })
+}
+
+async function removePathRecursively(path: string, stats: BigIntStats, callbacks: RemovalCallbacks, unlinkTreeLinks = false): Promise<{ entries: number; bytes: number }> {
     if (stats.isFile()) {
         const bytes = await removeFile(path, stats, callbacks)
         return { entries: 1, bytes }
@@ -41,7 +62,13 @@ async function removePathRecursively(path: string, stats: BigIntStats, callbacks
     let bytes = 0
     for (const name of await readdir(path)) {
         const child = resolve(path, name)
-        const result = await removePathRecursively(child, await inspectCanonicalEntry(child), callbacks)
+        const childStats = unlinkTreeLinks ? await inspectTreeEntry(child) : await inspectCanonicalEntry(child)
+        if (childStats.isSymbolicLink()) {
+            await removeLink(child, childStats, callbacks)
+            entries += 1
+            continue
+        }
+        const result = await removePathRecursively(child, childStats, callbacks, unlinkTreeLinks)
         entries += result.entries
         bytes += result.bytes
     }
@@ -87,12 +114,12 @@ export async function removeFilesystemCandidate(candidate: CleanupCandidate, cal
     }
 
     // Verify the entire tree before starting so a new linked or inaccessible child prevents removal.
-    await measurePath(target.path, target.stats)
+    await measurePath(target.path, target.stats, candidate.unlinkTreeLinks)
     const current = await resolveTarget(candidate.path, candidate.allowedRoot)
     if (canonicalPathKey(current.path) !== canonicalPathKey(target.path) || !hasIdentity(current, target.identity)) {
         throw new UnverifiedPathError(`${target.path} changed before removal.`)
     }
 
-    const result = await removePathRecursively(current.path, current.stats, callbacks)
+    const result = await removePathRecursively(current.path, current.stats, callbacks, candidate.unlinkTreeLinks)
     return { removedEntries: result.entries, reclaimedBytes: result.bytes }
 }

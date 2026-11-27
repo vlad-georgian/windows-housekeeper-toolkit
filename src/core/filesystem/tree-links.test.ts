@@ -1,0 +1,90 @@
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { link, mkdir, readFile, readdir, rm, symlink } from 'node:fs/promises'
+import { join } from 'node:path'
+
+import { createSandbox, type Sandbox } from '../../test-support/fixtures.ts'
+import type { RemovedEntry } from '../types.ts'
+import { createFilesystemCandidate, pathExists, removeFilesystemCandidate } from './index.ts'
+
+let sandbox: Sandbox
+const apps = join('Users', 'test', 'tool')
+const release = join(apps, '1.0.0')
+
+beforeEach(async () => {
+    sandbox = await createSandbox()
+})
+afterEach(() => sandbox.dispose())
+
+/** A pnpm-style release: an internal junction and a file hardlinked into a store outside the release. */
+async function pnpmRelease(): Promise<{ outside: string; store: string }> {
+    await sandbox.file(join(release, 'package.json'), '{}')
+    await sandbox.file(join(release, 'node_modules', '.pnpm', 'pkg@1', 'node_modules', 'pkg', 'index.js'), 'module')
+    await symlink(join(sandbox.root, release, 'node_modules', '.pnpm', 'pkg@1', 'node_modules', 'pkg'), join(sandbox.root, release, 'node_modules', 'pkg'), 'junction')
+    const store = await sandbox.file(join('Users', 'test', 'store', 'content'), 'shared content')
+    await link(store, join(sandbox.root, release, 'node_modules', 'shared.js'))
+    return { outside: await sandbox.directory(join('Users', 'test', 'elsewhere')), store }
+}
+
+const candidateOptions = () => ({
+    id: 'tool:release:1.0.0',
+    path: join(sandbox.root, release),
+    allowedRoot: join(sandbox.root, apps),
+    displayName: 'Tool 1.0.0',
+    reason: 'test',
+    type: 'directory' as const
+})
+
+describe('links inside a verified tree', () => {
+    test('are rejected by default, so a pnpm-style release is not a candidate', async () => {
+        await pnpmRelease()
+        expect(await createFilesystemCandidate(candidateOptions())).toBeNull()
+    })
+
+    test('are measured without being followed when the cleaner opts in', async () => {
+        await pnpmRelease()
+        const candidate = await createFilesystemCandidate({ ...candidateOptions(), unlinkTreeLinks: true })
+        if (!candidate) throw new Error('Expected a candidate.')
+
+        // package.json (2 bytes) and index.js (6 bytes). The hardlinked file is shared with the store.
+        expect(candidate.sizeBytes).toBe(8)
+    })
+
+    test('are removed without following them or touching what they point to', async () => {
+        const { outside, store } = await pnpmRelease()
+        await sandbox.file(join('Users', 'test', 'elsewhere', 'keep.txt'), 'keep')
+        await symlink(outside, join(sandbox.root, release, 'node_modules', 'out'), 'junction')
+        const candidate = await createFilesystemCandidate({ ...candidateOptions(), unlinkTreeLinks: true })
+        if (!candidate) throw new Error('Expected a candidate.')
+        const removed: RemovedEntry[] = []
+
+        await removeFilesystemCandidate(candidate, { onRemoved: async (entry) => void removed.push(entry) })
+
+        expect(await pathExists(join(sandbox.root, release))).toBe(false)
+        expect(await readdir(outside)).toEqual(['keep.txt'])
+        expect(await readFile(store, 'utf8')).toBe('shared content')
+        expect(removed.filter((entry) => entry.kind === 'link').map((entry) => entry.path.split('\\').at(-1))).toEqual(expect.arrayContaining(['pkg', 'out']))
+    })
+
+    test('never let a directory swapped for a link after detection redirect removal', async () => {
+        await sandbox.file(join(release, 'package.json'), '{}')
+        await sandbox.file(join(release, 'node_modules', 'lib', 'a.js'), 'a')
+        const outside = await sandbox.file(join('Users', 'test', 'elsewhere', 'precious.txt'), 'precious')
+        const candidate = await createFilesystemCandidate({ ...candidateOptions(), unlinkTreeLinks: true })
+        if (!candidate) throw new Error('Expected a candidate.')
+
+        await rm(join(sandbox.root, release, 'node_modules', 'lib'), { recursive: true })
+        await symlink(join(sandbox.root, 'Users', 'test', 'elsewhere'), join(sandbox.root, release, 'node_modules', 'lib'), 'junction')
+        await removeFilesystemCandidate(candidate, { onRemoved: async () => {} })
+
+        expect(await readFile(outside, 'utf8')).toBe('precious')
+        expect(await pathExists(join(sandbox.root, release))).toBe(false)
+    })
+
+    test('never allow the candidate itself to be a link', async () => {
+        const target = await sandbox.directory(join('Users', 'test', 'elsewhere'))
+        await mkdir(join(sandbox.root, apps), { recursive: true })
+        await symlink(target, join(sandbox.root, release), 'junction')
+
+        expect(await createFilesystemCandidate({ ...candidateOptions(), unlinkTreeLinks: true })).toBeNull()
+    })
+})
