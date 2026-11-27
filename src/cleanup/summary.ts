@@ -50,6 +50,6 @@ export function describeSummary(summary: CleanupSummary, dryRun: boolean, auditP
         : `${formatBytes(summary.reclaimedBytes)} reclaimed across ${summary.removedEntries} entries.`
     const drives = [...summary.bytesByDrive].map(([drive, size]) => `${drive} ${formatBytes(size)}`)
     const skippedApps = summary.skippedApps.size ? [`Skipped running apps: ${[...summary.skippedApps].join(', ')}.`] : []
-    const skippedEntries = summary.skippedEntries ? [`${summary.skippedEntries} locked or inaccessible entries skipped.`] : []
+    const skippedEntries = summary.skippedEntries ? [`Locked or inaccessible entries skipped: ${summary.skippedEntries}.`] : []
     return [result, ...drives, ...skippedApps, ...skippedEntries, `${summary.failures} failure(s).`, `Detailed log: ${auditPath}`]
 }

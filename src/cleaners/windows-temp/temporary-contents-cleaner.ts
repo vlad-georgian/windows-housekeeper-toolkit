@@ -8,10 +8,14 @@ import { BaseCleaner } from '../base-cleaner.ts'
  * Every entry is eligible regardless of age. Entries Windows will not release are skipped.
  */
 export abstract class TemporaryContentsCleaner extends BaseCleaner {
-    readonly appId = 'windows-temp'
+    // No running-app check applies: Windows refuses to delete files that are in use, and those
+    // entries are skipped. The ID is deliberately not a key of the process-guard catalog.
+    readonly appId = 'windows-temporary-files'
     readonly category = 'windows-temp'
 
     protected abstract readonly root: string
+    /** The only conventional locations the root may equal or lie inside. */
+    protected abstract readonly allowed: readonly string[]
     protected abstract readonly reason: string
 
     constructor(protected readonly paths: SystemPaths) {
@@ -22,8 +26,7 @@ export abstract class TemporaryContentsCleaner extends BaseCleaner {
         return createContentsCandidate({
             id: `${this.id}:contents`,
             root: this.root,
-            within: this.paths.home,
-            protectedPaths: [this.paths.home, this.paths.localAppData, this.paths.roamingAppData],
+            allowed: this.allowed,
             displayName: `${this.label} contents`,
             reason: this.reason
         }).then((candidate) => (candidate ? [candidate] : []))

@@ -48,6 +48,7 @@ export async function runCleanup(
                 }
                 let skippedHere = 0
                 const removal = await cleaner.remove(candidate, {
+                    protectedPaths: [audit.path],
                     onSkipped: async (entry) => {
                         skippedHere += 1
                         summary.skippedEntries += 1
@@ -70,7 +71,7 @@ export async function runCleanup(
                     p.log.success(`Removed ${candidate.displayName} (${size})\n  ${location}`)
                 }
                 if (!signIn && skippedHere > 0) {
-                    p.log.warn(`Skipped ${skippedHere} locked or inaccessible entries in ${candidate.displayName}. The audit log lists each one.`)
+                    p.log.warn(`Locked or inaccessible entries skipped in ${candidate.displayName}: ${skippedHere}. The audit log lists each one.`)
                 }
             } catch (error) {
                 summary.failures += 1

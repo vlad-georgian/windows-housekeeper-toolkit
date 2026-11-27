@@ -33,7 +33,7 @@ export const cleanupCategories: readonly CleanupCategory[] = [
     {
         id: 'windows-temp',
         operation: 'caches',
-        label: 'Per-user Windows temporary directories',
+        label: 'Windows temporary directory cleanup',
         checklistMessage: 'Which per-user temporary locations should be emptied? Files that are in use are skipped.',
         signIn: false
     },
