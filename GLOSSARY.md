@@ -16,9 +16,13 @@ Removal of regenerable application data that leaves ordinary application use int
 
 Removal of rebuildable stores whose absence can require redownloads or prevent offline use.
 
+**Windows temporary directory cleanup**
+
+Removal of everything inside the per-user Temp directory and the per-user Temporary Internet Files cache, regardless of age. The folders themselves stay, links are never followed, and locked or inaccessible entries are skipped. Machine-wide Windows temporary folders are outside it.
+
 **Cleanup category**
 
-A class of cleanup candidates grouped by what the underlying data is: general cache cleanup, destructive cache cleanup, or old data and installations. Unattended runs name the categories they include.
+A class of cleanup candidates grouped by what the underlying data is: general cache cleanup, destructive cache cleanup, Windows temporary directory cleanup, or old data and installations. Unattended runs name the categories they include.
 
 **Launch menu**
 

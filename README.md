@@ -18,20 +18,23 @@ Run `vp run start` to open the launch menu. Every choice starts unchecked. Use
 the arrow keys to move, **Space** to toggle an item, **A** to toggle all, and
 **Enter** to confirm. **Remove caches** opens the general cache checklist, then
 a separate checklist of package download caches that shows the redownload and
-offline-use implications. **Remove old data and installations** lists apps with
+offline-use implications, then a checklist of per-user Windows temporary
+directories. **Remove old data and installations** lists apps with
 superseded releases or installer payloads. The CLI gathers every choice, then
 shows one combined plan to confirm. Cancelling any prompt applies nothing.
 Close the selected apps before removal.
 
 For an unattended run, name each cleanup category with `--category`:
-`general-cache`, `destructive-cache`, or `old-installations`. Destructive caches
-run only when their category is named.
+`general-cache`, `destructive-cache`, `windows-temp`, or `old-installations`.
+Destructive caches and Windows temporary directories run only when their
+category is named.
 
 ```powershell
 vp run start --dry-run
 vp run start --dry-run --category general-cache
 vp run start --category general-cache --category old-installations
 vp run start --category destructive-cache --log-dir D:\cleanup-logs
+vp run start --dry-run --category windows-temp
 ```
 
 Dry runs show the candidate path, reason, and known space by storage drive.
@@ -42,8 +45,13 @@ removal is manual and requires elevation.
 
 General cache cleanup covers Codex, Claude Code, Claude Desktop, Discord,
 GitHub Desktop, and VS Code caches. Destructive cache cleanup covers per-user
-npm, Bun, Scoop, Chocolatey, and NuGet download caches. Old-installation cleanup
-keeps only the selected release in each Codex release store and any staged
+npm, Bun, Scoop, Chocolatey, and NuGet download caches. Windows temporary
+directory cleanup empties the per-user Temp directory and Temporary Internet
+Files cache (`%LOCALAPPDATA%\Microsoft\Windows\INetCache`) regardless of file
+age. It keeps both folders, removes links without following them, and skips
+locked or inaccessible entries while reporting them in the summary and audit
+log. Machine-wide Windows temporary folders are never touched.
+Old-installation cleanup keeps only the selected release in each Codex release store and any staged
 update, and covers superseded Claude Code binaries, Squirrel desktop apps such
 as GitHub Desktop and Discord, and updater payloads for installed updates. The
 default manual audit directory is `./logs`. Each file is named
