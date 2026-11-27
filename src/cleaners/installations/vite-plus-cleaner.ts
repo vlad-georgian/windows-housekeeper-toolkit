@@ -8,10 +8,18 @@ import { compareVersions } from '../../core/versions.ts'
 import { listWindowsProcesses } from '../../windows/processes.ts'
 import { BaseCleaner } from '../base-cleaner.ts'
 import type { Environment } from '../helpers.ts'
-import type { ProcessLister } from './codex-installations.ts'
-import { isPathInUse, runningProcessPaths } from './running-paths.ts'
+import { isPathInUse, type ProcessLister, runningProcessPaths } from './running-paths.ts'
+import { isInstallLockHeld } from './vite-plus-install-lock.ts'
 
-const releaseName = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/
+// A release directory is named by its version. `vp upgrade --force` adds a `+force.<pid>.<nanos>`
+// suffix so it can reinstall the active version beside the running binary.
+const releaseName = /^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\+force\.\d+\.\d+)?$/
+// Executables that run from, or write into, a release. An unreadable one blocks removal.
+const vitePlusProcess = /^(?:vp[rx]?|node|pnpm|oxlint|oxfmt|tsgolint)(?:\.exe)?$/i
+
+const baseVersion = (name: string): string | null => releaseName.exec(name)?.[1] ?? null
+
+type InstallLockProbe = (lockPath: string) => Promise<boolean>
 
 interface ReleaseStore {
     readonly home: string
@@ -19,13 +27,36 @@ interface ReleaseStore {
     readonly retained: ReadonlySet<string>
 }
 
+/**
+ * Vite+ keeps releases in one directory. Since 0.3.0 that is the split data directory, unless
+ * `VP_HOME` pins one root or a `~\.vite-plus` install already exists and is reused.
+ */
+async function dataDirectory(paths: SystemPaths, environment: Environment): Promise<string> {
+    const pinned = environment.VP_HOME
+    if (pinned && isAbsolute(pinned)) return pinned
+
+    const legacy = join(paths.home, '.vite-plus')
+    try {
+        await lstat(join(legacy, 'current'))
+        return legacy
+    } catch (error) {
+        if (!isUnavailablePath(error)) throw error
+    }
+
+    // The directory group is only honored when set completely, as the Vite+ installer requires.
+    const group = [environment.VP_BIN_DIR, environment.VP_DATA_DIR, environment.VP_CACHE_DIR]
+    const [, data] = group
+    return data && group.every((value) => value && isAbsolute(value)) ? data : join(paths.localAppData, 'vite-plus', 'data')
+}
+
 async function verifyRelease(home: string, name: string): Promise<boolean> {
-    if (!releaseName.test(name)) return false
+    const version = baseVersion(name)
+    if (!version) return false
     const manifest = await readSmallTextFile(join(home, name, 'package.json'), home)
     if (manifest === null) return false
     try {
         const parsed: unknown = JSON.parse(manifest)
-        return typeof parsed === 'object' && parsed !== null && 'version' in parsed && parsed.version === name
+        return typeof parsed === 'object' && parsed !== null && 'version' in parsed && parsed.version === version
     } catch {
         return false
     }
@@ -64,7 +95,9 @@ async function inspectStore(home: string): Promise<ReleaseStore | null> {
 }
 
 async function canRemoveRelease(store: ReleaseStore, name: string): Promise<boolean> {
-    return releaseName.test(name) && !store.retained.has(name) && compareVersions(name, store.active) < 0 && (await verifyRelease(store.home, name))
+    const version = baseVersion(name)
+    const active = baseVersion(store.active)
+    return version !== null && active !== null && !store.retained.has(name) && compareVersions(version, active) < 0 && (await verifyRelease(store.home, name))
 }
 
 export class VitePlusInstallationCleaner extends BaseCleaner {
@@ -79,21 +112,17 @@ export class VitePlusInstallationCleaner extends BaseCleaner {
     constructor(
         private readonly paths: SystemPaths,
         private readonly environment: Environment = process.env,
-        private readonly listProcesses: ProcessLister = listWindowsProcesses
+        private readonly listProcesses: ProcessLister = listWindowsProcesses,
+        private readonly isInstallLocked: InstallLockProbe = isInstallLockHeld
     ) {
         super()
     }
 
-    private home(): string {
-        const override = this.environment.VP_HOME
-        return override && isAbsolute(override) ? override : join(this.paths.home, '.vite-plus')
-    }
-
     async detect(): Promise<readonly CleanupCandidate[]> {
-        const home = this.home()
+        const home = await dataDirectory(this.paths, this.environment)
         const store = await inspectStore(home)
-        if (!store) return []
-        const processes = await runningProcessPaths(this.listProcesses)
+        if (!store || (await this.isInstallLocked(join(store.home, '.install.lock')))) return []
+        const processes = await runningProcessPaths(this.listProcesses, vitePlusProcess)
         if (processes === null) return []
 
         const candidates: CleanupCandidate[] = []
@@ -105,7 +134,10 @@ export class VitePlusInstallationCleaner extends BaseCleaner {
                 allowedRoot: home,
                 displayName: `Vite+ ${name}`,
                 reason: `Superseded release. The active release ${store.active}${store.retained.size > 1 ? ' and the recorded fallback are' : ' is'} preserved.`,
-                type: 'directory'
+                type: 'directory',
+                // A release is a pnpm install: junctions into its virtual store and files hardlinked
+                // from the shared content store. They are unlinked, never followed.
+                unlinkTreeLinks: true
             })
             if (candidate) candidates.push(candidate)
         }
@@ -117,11 +149,17 @@ export class VitePlusInstallationCleaner extends BaseCleaner {
         if (!path) throw new Error(`Missing verified path for ${candidate.displayName}.`)
         const name = basename(path)
         const store = await inspectStore(dirname(path))
-        const processes = await runningProcessPaths(this.listProcesses)
-        if (!store || processes === null || candidate.id !== `vite-plus:release:${name}` || !(await canRemoveRelease(store, name))) {
+        if (!store || candidate.id !== `vite-plus:release:${name}` || !(await canRemoveRelease(store, name))) {
             throw new Error(`The Vite+ release selection changed after detection at ${dirname(path)}.`)
         }
-        if (isPathInUse(path, processes)) throw new Error(`${candidate.displayName} is in use.`)
+        // Vite+ holds this lock while it swaps `current` or `.previous-version`, for example during a rollback.
+        if (await this.isInstallLocked(join(store.home, '.install.lock'))) {
+            throw new Error(`The Vite+ installer is running at ${store.home}.`)
+        }
+        const processes = await runningProcessPaths(this.listProcesses, vitePlusProcess)
+        if (processes === null || isPathInUse(path, processes)) {
+            throw new Error(`Could not verify that ${candidate.displayName} is inactive.`)
+        }
         return super.remove(candidate, callbacks)
     }
 }

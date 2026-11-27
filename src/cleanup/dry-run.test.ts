@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
-import { readFile, symlink } from 'node:fs/promises'
+import { link, readFile, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { createCleaners } from '../cleaners/index.ts'
@@ -17,7 +17,7 @@ import { type CleanupSession, runUnattendedCleanup } from './operations.ts'
 import { newSummary } from './summary.ts'
 
 // Overrides that would point cleaners at real locations instead of the sandbox.
-const overrides = ['CODEX_HOME', 'SCOOP', 'SCOOP_CACHE', 'BUN_INSTALL', 'BUN_INSTALL_CACHE_DIR', 'ChocolateyInstall', 'VP_HOME']
+const overrides = ['CODEX_HOME', 'SCOOP', 'SCOOP_CACHE', 'BUN_INSTALL', 'BUN_INSTALL_CACHE_DIR', 'ChocolateyInstall', 'VP_HOME', 'VP_BIN_DIR', 'VP_DATA_DIR', 'VP_CACHE_DIR']
 const saved = new Map(overrides.map((name) => [name, process.env[name]]))
 beforeAll(() => {
     for (const name of overrides) delete process.env[name]
@@ -150,9 +150,15 @@ describe('dry run per cleanup category', () => {
     })
 
     test('old-installation cleanup previews obsolete Vite+, Claude Code, and VS Code data and preserves the rest', async () => {
-        const vp = join(home, '.vite-plus')
+        // Releases are pnpm installs in the split data directory: a junction into the virtual store and a hardlink from the store.
+        const vp = join(local, 'vite-plus', 'data')
+        const store = await sandbox.file(join(home, 'pnpm-store', 'content'), 'shared')
         for (const version of ['0.1.0', '0.2.0', '0.3.0', '0.4.0']) {
             await sandbox.file(join(vp, version, 'package.json'), JSON.stringify({ version }))
+            const virtual = join(vp, version, 'node_modules', '.pnpm', 'vite-plus', 'node_modules', 'vite-plus')
+            await sandbox.directory(virtual)
+            await link(store, join(sandbox.root, virtual, 'index.js'))
+            await symlink(join(sandbox.root, virtual), join(sandbox.root, vp, version, 'node_modules', 'vite-plus'), 'junction')
         }
         await symlink(join(sandbox.root, vp, '0.3.0'), join(sandbox.root, vp, 'current'), 'junction')
         await sandbox.file(join(vp, '.previous-version'), '0.2.0')
