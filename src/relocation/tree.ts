@@ -3,6 +3,7 @@ import { constants } from 'node:fs'
 import { chmod, copyFile, lstat, mkdir, open, readdir, rmdir, unlink, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import { readWindowsFilePermissions } from '../windows/file-permissions.ts'
 import { requireDirectoryIdentity } from './directory-path.ts'
 
 /** A directory tree holds something relocation cannot copy faithfully yet, such as a link. */
@@ -23,6 +24,8 @@ export interface TreeManifest {
     readonly entries: readonly TreeEntry[]
     readonly bytes: number
     readonly files: number
+    /** Owner, group, and DACL, ordered by root and then tree entries. */
+    readonly permissions: readonly string[]
 }
 
 async function hashFile(path: string): Promise<string> {
@@ -67,8 +70,7 @@ export async function measureTree(root: string): Promise<{ bytes: number; files:
     return { bytes, files }
 }
 
-/** Records every entry of a plain directory tree, with file content hashes. */
-export async function snapshotTree(root: string): Promise<TreeManifest> {
+async function snapshotContents(root: string): Promise<Omit<TreeManifest, 'permissions'>> {
     await requireDirectory(root)
     const entries: TreeEntry[] = []
     await walk(root, async (entry, absolute) => {
@@ -78,7 +80,17 @@ export async function snapshotTree(root: string): Promise<TreeManifest> {
     return { entries, bytes: files.reduce((total, entry) => total + entry.bytes, 0), files: files.length }
 }
 
-function describeDifference(expected: TreeManifest, actual: TreeManifest): string | null {
+function permissionPaths(root: string, entries: readonly TreeEntry[]): { path: string; kind: TreeEntry['kind'] }[] {
+    return [{ path: root, kind: 'directory' }, ...entries.map((entry) => ({ path: join(root, entry.path), kind: entry.kind }))]
+}
+
+/** Records contents, read-only flags, and Windows permissions of a plain directory tree. */
+export async function snapshotTree(root: string): Promise<TreeManifest> {
+    const contents = await snapshotContents(root)
+    return { ...contents, permissions: await readWindowsFilePermissions(permissionPaths(root, contents.entries)) }
+}
+
+function describeDifference(expected: TreeManifest, actual: Omit<TreeManifest, 'permissions'>): string | null {
     const actualByPath = new Map(actual.entries.map((entry) => [entry.path.toLowerCase(), entry]))
     for (const entry of expected.entries) {
         const other = actualByPath.get(entry.path.toLowerCase())
@@ -93,8 +105,16 @@ function describeDifference(expected: TreeManifest, actual: TreeManifest): strin
 
 /** Throws unless the tree at `root` matches `manifest`. */
 export async function verifyTreeContents(root: string, manifest: TreeManifest): Promise<void> {
-    const difference = describeDifference(manifest, await snapshotTree(root))
+    const difference = describeDifference(manifest, await snapshotContents(root))
     if (difference) throw new Error(`Verification failed at ${root}: ${difference}.`)
+}
+
+async function verifyTreePermissions(root: string, manifest: TreeManifest): Promise<void> {
+    const paths = permissionPaths(root, manifest.entries)
+    const permissions = await readWindowsFilePermissions(paths)
+    for (const [index, { path }] of paths.entries()) {
+        if (permissions[index] !== manifest.permissions[index]) throw new Error(`Windows permissions differ at ${path}.`)
+    }
 }
 
 async function verifyDirectoryWrites(directory: string): Promise<void> {
@@ -125,6 +145,7 @@ export async function verifyTree(root: string, manifest: TreeManifest): Promise<
             }
         }
     }
+    await verifyTreePermissions(root, manifest)
 }
 
 /** Copies a plain directory tree to a new `target`, preserving read-only flags and file times. */
@@ -145,10 +166,12 @@ export async function copyTree(source: string, target: string, onCreated?: () =>
     })
 }
 
-/** Removes a tree after verifying it still matches `manifest`, so no unexpected data is lost. */
-export async function removeTree(root: string, manifest: TreeManifest, identity?: string): Promise<void> {
+/** Verifies the tree and any surviving copy before removing it. */
+export async function removeTree(root: string, manifest: TreeManifest, identity?: string, verifySurvivor?: () => Promise<void>): Promise<void> {
     if (identity !== undefined) await requireDirectoryIdentity(root, identity)
     await verifyTreeContents(root, manifest)
+    await verifyTreePermissions(root, manifest)
+    await verifySurvivor?.()
     if (identity !== undefined) await requireDirectoryIdentity(root, identity)
     await removeVerifiedTree(root)
 }

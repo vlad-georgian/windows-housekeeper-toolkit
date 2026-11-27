@@ -260,16 +260,19 @@ export async function moveDirectory(transfer: DirectoryTransfer, options: Transf
 
     try {
         await tracker.enter('reclaiming')
-        await inspectDestinationPath(base, destination, 'move', progress.destinationParents)
         const stagedIdentity = progress.stagingIdentity
         if (!stagedIdentity) throw new Error(`The identity of ${destination} could not be verified.`)
-        await requireDirectoryIdentity(destination, stagedIdentity)
-        await verifyJunction(original, destination)
         await inspectDirectoryPath(dirname(original), originalDirectories.slice(0, -1))
-        await removeTree(aside, manifest, source.identity)
+        await removeTree(aside, manifest, source.identity, async () => {
+            await inspectDestinationPath(base, destination, 'move', progress.destinationParents)
+            await requireDirectoryIdentity(destination, stagedIdentity)
+            await verifyTree(destination, manifest)
+            await requireDirectoryIdentity(destination, stagedIdentity)
+            await verifyJunction(original, destination)
+        })
     } catch (error) {
         throw new IncompleteTransferError(
-            `${original} now links to ${destination}, but its old copy at ${aside} was not removed (${errorMessage(error)}). Recovery details are in ${options.journal.location}.`,
+            `The move of ${original} could not safely reclaim its old copy at ${aside} (${errorMessage(error)}). Recovery details are in ${options.journal.location}.`,
             tracker.record(),
             { cause: error }
         )
@@ -352,13 +355,17 @@ export async function restoreDirectory(transfer: DirectoryTransfer, options: Tra
     try {
         await tracker.enter('releasing')
         await inspectDestinationPath(base, destination, 'restore', destinationDirectories)
-        await inspectDirectoryPath(dirname(original), originalParents)
-        if (!stagingIdentity) throw new Error(`The identity of ${original} could not be verified.`)
-        await requireDirectoryIdentity(original, stagingIdentity)
-        await removeTree(destination, manifest, relocated.identity)
+        const restoredIdentity = stagingIdentity
+        if (!restoredIdentity) throw new Error(`The identity of ${original} could not be verified.`)
+        await removeTree(destination, manifest, relocated.identity, async () => {
+            await inspectDirectoryPath(dirname(original), originalParents)
+            await requireDirectoryIdentity(original, restoredIdentity)
+            await verifyTree(original, manifest)
+            await requireDirectoryIdentity(original, restoredIdentity)
+        })
     } catch (error) {
         throw new IncompleteTransferError(
-            `${original} was restored, but the relocated copy at ${destination} was not removed (${errorMessage(error)}). Recovery details are in ${options.journal.location}.`,
+            `The restore of ${original} could not safely release the relocated copy at ${destination} (${errorMessage(error)}). Recovery details are in ${options.journal.location}.`,
             tracker.record(),
             { cause: error }
         )

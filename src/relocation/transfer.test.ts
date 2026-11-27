@@ -336,3 +336,29 @@ describe('restoring a directory', () => {
         expect(await journal.list()).toMatchObject([{ action: 'restore', original, destination, phase: 'releasing' }])
     })
 })
+
+test.each(['move', 'restore'] as const)('keeps the intact copy when the final %s tree changes before reclamation', async (action) => {
+    const transfer = { appId: 'github-desktop', original, destination, base }
+    if (action === 'restore') await moveDirectory(transfer, { journal })
+
+    const perform = action === 'move' ? moveDirectory : restoreDirectory
+    const finalPath = action === 'move' ? destination : original
+    const phaseToInterrupt = action === 'move' ? 'reclaiming' : 'releasing'
+    const error = await rejection(
+        perform(transfer, {
+            journal,
+            async beforePhase(phase) {
+                if (phase === phaseToInterrupt) await writeFile(join(finalPath, 'Update.exe'), 'changed after placement')
+            }
+        })
+    )
+
+    expect(error).toBeInstanceOf(IncompleteTransferError)
+    expect(error).toHaveProperty('message', expect.stringContaining('Update.exe differs'))
+    const [record] = await journal.list()
+    if (!record) throw new Error('Expected the failed transfer to retain its record.')
+    expect(record.phase).toBe(phaseToInterrupt)
+    const intact = record.aside ?? destination
+    await chmod(join(intact, 'app-3.4.0', 'locked.dat'), 0o666)
+    expect(await readFile(join(intact, 'Update.exe'), 'utf8')).toBe('updater')
+})
