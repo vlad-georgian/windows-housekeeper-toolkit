@@ -4,9 +4,9 @@ import { basename, dirname, isAbsolute, join } from 'node:path'
 import { canonicalPathKey, createFilesystemCandidate, isPathInside, isUnavailablePath, listDirectoryNames } from '../../core/filesystem/index.ts'
 import type { SystemPaths } from '../../core/system-paths.ts'
 import type { CleanupCandidate, RemovalResult } from '../../core/types.ts'
-import { listWindowsProcesses, type WindowsProcess } from '../../windows/processes.ts'
+import { listWindowsProcesses, type ProcessLister } from '../../windows/processes.ts'
 
-export type ProcessLister = () => Promise<readonly WindowsProcess[]>
+export type { ProcessLister }
 import { scoopRoot } from '../helpers.ts'
 import { canRemoveRelease, inspectReleaseStore, readManifest, storeNames } from './codex-release-store.ts'
 

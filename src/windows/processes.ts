@@ -7,6 +7,8 @@ export interface WindowsProcess {
     readonly commandLine?: string | null
 }
 
+export type ProcessLister = () => Promise<readonly WindowsProcess[]>
+
 function isWindowsProcess(value: unknown): value is WindowsProcess {
     return (
         typeof value === 'object' &&

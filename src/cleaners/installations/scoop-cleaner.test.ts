@@ -1,11 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { link, lstat, readFile, realpath, rm, rmdir, symlink } from 'node:fs/promises'
+import { link, lstat, mkdir, readFile, realpath, rename, rm, rmdir, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import type { CleanupCandidate, RemovalCallbacks } from '../../core/types.ts'
 import { createSandbox, type Sandbox } from '../../test-support/fixtures.ts'
-import type { WindowsProcess } from '../../windows/processes.ts'
-import type { ProcessLister } from './codex-installations.ts'
+import type { ProcessLister, WindowsProcess } from '../../windows/processes.ts'
 import { ScoopInstallationCleaner } from './scoop-cleaner.ts'
 
 let sandbox: Sandbox
@@ -22,7 +21,9 @@ const appPath = (app: string, ...parts: string[]): string => join(scoop, 'apps',
 const persistPath = (app: string, ...parts: string[]): string => join(scoop, 'persist', app, ...parts)
 
 interface VersionOptions {
-    readonly bucket?: string
+    /** `null` omits the bucket, as Scoop does for apps installed from a manifest URL or path. */
+    readonly bucket?: string | null
+    readonly url?: string
     readonly hold?: boolean
     readonly manifestVersion?: string
     readonly persistDirectories?: readonly string[]
@@ -31,10 +32,13 @@ interface VersionOptions {
 
 /** A Scoop version directory with the manifest, install metadata, and persisted-data junctions Scoop writes. */
 async function addVersion(app: string, version: string, options: VersionOptions = {}): Promise<void> {
-    const { bucket = 'main', hold = false, manifestVersion = version, persistDirectories = [], withInstallMetadata = true } = options
+    const { bucket = 'main', url, hold = false, manifestVersion = version, persistDirectories = [], withInstallMetadata = true } = options
     await sandbox.file(appPath(app, version, 'manifest.json'), JSON.stringify({ version: manifestVersion, persist: persistDirectories }))
     if (withInstallMetadata) {
-        await sandbox.file(appPath(app, version, 'install.json'), JSON.stringify({ bucket, architecture: '64bit', ...(hold && { hold: true }) }))
+        await sandbox.file(
+            appPath(app, version, 'install.json'),
+            JSON.stringify({ ...(bucket !== null && { bucket }), ...(url && { url }), architecture: '64bit', ...(hold && { hold: true }) })
+        )
     }
     await sandbox.file(appPath(app, version, `${app}.exe`), version)
     for (const directory of persistDirectories) {
@@ -156,6 +160,27 @@ describe('Scoop installations', () => {
         expect(names(await cleaner().detect())).toEqual(['Scoop tool 1.3.0'])
     })
 
+    test('treats only releases from the same bucket or manifest URL as one channel', async () => {
+        const manifest = 'https://example.test/tool.json'
+        // Neither bucket nor URL recorded: the channel cannot be established.
+        await addVersion('anonymous', '2.0.0', { bucket: null })
+        await select('anonymous', '2.0.0')
+        await addVersion('anonymous', '1.0.0', { bucket: null })
+        // The same manifest URL is one channel; different manifests are not.
+        await addVersion('sameurl', '2.0.0', { bucket: null, url: manifest })
+        await select('sameurl', '2.0.0')
+        await addVersion('sameurl', '1.0.0', { bucket: null, url: manifest })
+        await addVersion('otherurl', '2.0.0', { bucket: null, url: manifest })
+        await select('otherurl', '2.0.0')
+        await addVersion('otherurl', '1.0.0', { bucket: null, url: 'https://example.test/fork.json' })
+        // A bucket install and a URL install of the same app are different channels.
+        await addVersion('mixed', '2.0.0')
+        await select('mixed', '2.0.0')
+        await addVersion('mixed', '1.0.0', { bucket: null, url: manifest })
+
+        expect(names(await cleaner().detect())).toEqual(['Scoop sameurl 1.0.0'])
+    })
+
     test('offers nothing when the selected version is not verifiable', async () => {
         await addVersion('noselection', '1.0.0')
         await addVersion('noselection', '2.0.0')
@@ -192,6 +217,19 @@ describe('Scoop installations', () => {
         expect(await cleaner(failingListing).detect()).toEqual([])
     })
 
+    test('checks a relocated version by its resolved path as well', async () => {
+        await addNode(['22.1.0', '24.2.0'], '24.2.0')
+        // Relocate the app directory and leave a junction behind, as a moved Scoop installation would.
+        const relocated = join(sandbox.root, 'Users', 'test', 'relocated')
+        await mkdir(relocated, { recursive: true })
+        await rename(join(sandbox.root, appPath('nodejs')), join(relocated, 'nodejs'))
+        await symlink(join(relocated, 'nodejs'), join(sandbox.root, appPath('nodejs')), 'junction')
+        const resolved = processListing(nodeAt(5, join(relocated, 'nodejs', '22.1.0', 'nodejs.exe')))
+
+        expect(await cleaner().detect()).toHaveLength(1)
+        expect(await cleaner(resolved).detect()).toEqual([])
+    })
+
     test('rechecks the selected version before removal', async () => {
         await addNode(['22.1.0', '24.0.0', '24.2.0'], '24.2.0')
         const candidates = await cleaner().detect()
@@ -202,7 +240,7 @@ describe('Scoop installations', () => {
         await rmCurrent('nodejs')
         await select('nodejs', '24.0.0')
 
-        expect(await failureOf(cleaner().remove(target, callbacks))).not.toBe('')
+        expect(await failureOf(cleaner().remove(target, callbacks))).toContain('changed after detection')
         expect(await exists(appPath('nodejs', '24.0.0', 'nodejs.exe'))).toBe(true)
         expect(await exists(persistPath('nodejs', 'bin'))).toBe(true)
     })
@@ -226,8 +264,11 @@ describe('Scoop installations', () => {
         await sandbox.file(join('Users', 'test', 'Documents', 'keep.txt'))
         await symlink(join(sandbox.root, 'Users', 'test', 'Documents'), join(sandbox.root, appPath('nodejs', '22.1.0', 'docs')), 'junction')
 
-        expect(await failureOf(cleaner().remove(target, callbacks))).not.toBe('')
+        expect(await failureOf(cleaner().remove(target, callbacks))).toContain('changed after detection')
         expect(await exists(join('Users', 'test', 'Documents', 'keep.txt'))).toBe(true)
+        // Nothing was unlinked before the refusal.
+        expect(await exists(appPath('nodejs', '22.1.0', 'nodejs.exe'))).toBe(true)
+        expect(await exists(appPath('nodejs', '22.1.0', 'bin'))).toBe(true)
         expect(await exists(persistPath('nodejs', 'bin'))).toBe(true)
     })
 })

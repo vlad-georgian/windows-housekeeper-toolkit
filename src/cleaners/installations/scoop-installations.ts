@@ -2,18 +2,28 @@ import type { BigIntStats } from 'node:fs'
 import { lstat, readdir, realpath, rmdir, unlink } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, normalize } from 'node:path'
 
-import { canonicalPathKey, isPathInside, isUnavailablePath, listDirectoryNames, pathExists, readSmallTextFile } from '../../core/filesystem/index.ts'
-import { hasIdentity, resolveTarget, UnverifiedPathError } from '../../core/filesystem/paths.ts'
+import {
+    canonicalPathKey,
+    hasIdentity,
+    isPathInside,
+    isUnavailablePath,
+    listDirectoryNames,
+    pathExists,
+    readSmallTextFile,
+    resolveTarget,
+    UnverifiedPathError
+} from '../../core/filesystem/index.ts'
 import type { CleanupCandidate, RemovalCallbacks } from '../../core/types.ts'
 import { compareVersions } from '../../core/versions.ts'
-import type { ProcessLister } from './codex-installations.ts'
+import type { ProcessLister } from '../../windows/processes.ts'
 
 /** Scoop version directories and the `persist` entries of its manifests use plain dotted numbers. */
 const plainVersion = /^\d+(?:\.\d+)*$/
 
 interface ScoopRelease {
     readonly name: string
-    readonly bucket: string | undefined
+    /** The release channel Scoop recorded at install time: a bucket, or the manifest URL for URL and path installs. */
+    readonly channel: string | null
     readonly held: boolean
     /** Declared `persist` entries by lowercase source path, mapped to their path under `persist\<app>`. */
     readonly persist: ReadonlyMap<string, string>
@@ -67,6 +77,12 @@ function persistEntries(manifest: Record<string, unknown>): Map<string, string> 
     return entries
 }
 
+function releaseChannel(install: Record<string, unknown>): string | null {
+    if (typeof install.bucket === 'string' && install.bucket) return `bucket:${install.bucket}`
+    if (typeof install.url === 'string' && install.url) return `url:${install.url}`
+    return null
+}
+
 /** Reads a version directory's Scoop manifest and install metadata. Incomplete or inconsistent releases return null. */
 async function readRelease(appDir: string, name: string): Promise<ScoopRelease | null> {
     if (!plainVersion.test(name)) return null
@@ -75,7 +91,7 @@ async function readRelease(appDir: string, name: string): Promise<ScoopRelease |
     if (!manifest || !install || manifest.version !== name) return null
     return {
         name,
-        bucket: typeof install.bucket === 'string' ? install.bucket : undefined,
+        channel: releaseChannel(install),
         held: install.hold === true,
         persist: persistEntries(manifest)
     }
@@ -111,10 +127,16 @@ async function inspectApp(root: string, name: string): Promise<ScoopApp | null> 
 }
 
 function isSuperseded(app: ScoopApp, release: ScoopRelease): boolean {
-    return release.name !== app.selected.name && !release.held && release.bucket === app.selected.bucket && compareVersions(release.name, app.selected.name) < 0
+    return (
+        release.name !== app.selected.name &&
+        !release.held &&
+        release.channel !== null &&
+        release.channel === app.selected.channel &&
+        compareVersions(release.name, app.selected.name) < 0
+    )
 }
 
-async function samePersistedFile(path: string, stats: BigIntStats, counterpart: string): Promise<boolean> {
+async function samePersistedFile(stats: BigIntStats, counterpart: string): Promise<boolean> {
     try {
         const other = await lstat(counterpart, { bigint: true })
         return other.isFile() && other.dev === stats.dev && other.ino === stats.ino
@@ -151,7 +173,7 @@ async function inspectVersionTree(
             total.files += 1
         } else if (stats.isFile()) {
             const target = release.persist.get(relativeKey(entryPath))
-            if (!target || !(await samePersistedFile(path, stats, join(app.persistRoot, target)))) return false
+            if (!target || !(await samePersistedFile(stats, join(app.persistRoot, target)))) return false
             links.push(path)
         } else {
             return false
@@ -206,20 +228,17 @@ export async function detectScoopInstallations(root: string, home: string, listP
     }
     if (planned.length === 0) return []
 
+    const candidates: { candidate: CleanupCandidate; locations: string[] }[] = []
+    for (const { app, release, tree } of planned) {
+        const candidate = await versionCandidate(app, release, tree)
+        if (candidate?.path && candidate.canonicalPath) candidates.push({ candidate, locations: [candidate.path, candidate.canonicalPath] })
+    }
     const inUse = await inUseVersions(
         listProcesses,
-        planned.map(({ app, release }) => join(app.appDir, release.name))
+        candidates.flatMap(({ locations }) => locations)
     )
     if (!inUse) return []
-
-    const candidates: CleanupCandidate[] = []
-    for (const { app, release, tree } of planned) {
-        const path = join(app.appDir, release.name)
-        if (inUse.has(path)) continue
-        const candidate = await versionCandidate(app, release, tree)
-        if (candidate) candidates.push(candidate)
-    }
-    return candidates
+    return candidates.filter(({ locations }) => !locations.some((location) => inUse.has(location))).map(({ candidate }) => candidate)
 }
 
 async function versionCandidate(app: ScoopApp, release: ScoopRelease, tree: VersionTree): Promise<CleanupCandidate | null> {
@@ -247,11 +266,9 @@ async function versionCandidate(app: ScoopApp, release: ScoopRelease, tree: Vers
 
 async function unlinkPersistLink(path: string): Promise<void> {
     // A junction is removed as a directory entry, never emptied: its target is the shared data.
-    try {
-        await unlink(path)
-    } catch {
-        await rmdir(path)
-    }
+    // A hard-linked file is unlinked as is; its read-only attribute is shared with the persisted copy.
+    if ((await lstat(path)).isSymbolicLink()) await rmdir(path)
+    else await unlink(path)
 }
 
 /**
