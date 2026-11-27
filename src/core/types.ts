@@ -38,6 +38,8 @@ export interface RemovalCallbacks {
     readonly onRemoved: (entry: RemovedEntry) => Promise<void>
     /** Reports an entry left in place, such as a locked file, while removal continues. */
     readonly onSkipped?: (entry: SkippedEntry) => Promise<void>
+    /** Files that must stay, such as the active audit log. Cleaners that empty directories honor them. */
+    readonly protectedPaths?: readonly string[]
 }
 
 export interface RemovalResult {

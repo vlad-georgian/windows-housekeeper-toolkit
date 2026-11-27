@@ -19,7 +19,7 @@ describe('cleanup CLI options', () => {
     })
 })
 
-describe('Windows temporary directories category', () => {
+describe('Windows temporary directory cleanup category', () => {
     test('is selected only when named for an unattended run', () => {
         expect(parseCliOptions(['--category', 'windows-temp']).categories).toEqual(['windows-temp'])
     })

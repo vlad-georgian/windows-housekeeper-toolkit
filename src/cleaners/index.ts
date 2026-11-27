@@ -3,11 +3,12 @@ import type { AppCleaner } from '../core/types.ts'
 import { createCacheCleaners } from './cache/index.ts'
 import { createInstallationCleaners } from './installations/index.ts'
 import { createPackageCacheCleaners } from './package-cache/index.ts'
+import { createWindowsTempCleaners } from './windows-temp/index.ts'
 
 /**
  * The cleaner catalog. Each operation folder registers its own cleaners, one file per app,
  * and each cleaner declares its cleanup category.
  */
 export function createCleaners(paths: SystemPaths): readonly AppCleaner[] {
-    return [...createCacheCleaners(paths), ...createPackageCacheCleaners(paths), ...createInstallationCleaners(paths)]
+    return [...createCacheCleaners(paths), ...createPackageCacheCleaners(paths), ...createWindowsTempCleaners(paths), ...createInstallationCleaners(paths)]
 }

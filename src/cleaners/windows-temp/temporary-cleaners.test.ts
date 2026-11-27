@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { readdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { readdir, readFile } from 'node:fs/promises'
+import { join, parse } from 'node:path'
 
+import { runUnattendedCleanup } from '../../cleanup/operations.ts'
+import { newSummary } from '../../cleanup/summary.ts'
+import { AuditLogger } from '../../core/audit-logger.ts'
 import { pathExists } from '../../core/filesystem/index.ts'
 import type { RemovedEntry, SkippedEntry } from '../../core/types.ts'
 import { createSandbox, type Sandbox } from '../../test-support/fixtures.ts'
+import { hasProcessGuard } from '../../windows/processes.ts'
 import { InternetCacheCleaner } from './internet-cache-cleaner.ts'
 import { UserTempCleaner } from './user-temp-cleaner.ts'
 
@@ -28,7 +32,7 @@ function callbacksFor(removed: RemovedEntry[], skipped: SkippedEntry[]): { onRem
 }
 
 describe('per-user Temp cleaner', () => {
-    test('belongs to the Windows temporary directories category', () => {
+    test('belongs to the Windows temporary directory cleanup category', () => {
         const cleaner = new UserTempCleaner(sandbox.paths)
         expect(cleaner.category).toBe('windows-temp')
         expect(cleaner.id).toBe('user-temp')
@@ -41,6 +45,30 @@ describe('per-user Temp cleaner', () => {
         expect(candidates).toHaveLength(1)
         expect(candidates[0]?.sizeBytes).toBe(5)
         expect(candidates[0]?.fileCount).toBe(2)
+    })
+
+    test.each([
+        ['Documents', join('Users', 'test', 'Documents')],
+        ['a source folder', join('Users', 'test', 'source')],
+        ['a folder directly in the profile', join('Users', 'test', 'tmp')],
+        ['the profile root', join('Users', 'test')],
+        ['AppData', join('Users', 'test', 'AppData', 'Roaming')],
+        ['LocalAppData', join('Users', 'test', 'AppData', 'Local')]
+    ])('does not offer a TEMP that points at %s', async (_name, relative) => {
+        await sandbox.file(join(relative, 'precious.txt'))
+        const cleaner = new UserTempCleaner({ ...sandbox.paths, temp: join(sandbox.root, relative) })
+        expect(await cleaner.detect()).toEqual([])
+    })
+
+    test('does not offer a TEMP that points at a drive root', async () => {
+        const cleaner = new UserTempCleaner({ ...sandbox.paths, temp: parse(sandbox.root).root })
+        expect(await cleaner.detect()).toEqual([])
+    })
+
+    test('offers a per-session folder inside the Temp directory', async () => {
+        await sandbox.file(join(local, 'Temp', '2', 'a.tmp'))
+        const cleaner = new UserTempCleaner({ ...sandbox.paths, temp: join(sandbox.paths.temp, '2') })
+        expect(await cleaner.detect()).toHaveLength(1)
     })
 
     test('does not offer machine-wide Windows temporary folders', async () => {
@@ -110,4 +138,33 @@ describe.skipIf(process.platform !== 'win32')('locked files on Windows', () => {
             await holder.exited
         }
     }, 30_000)
+})
+
+describe('audit log inside the Temp directory', () => {
+    test('keeps the active audit log, and its history, while emptying the rest', async () => {
+        const logDirectory = join(sandbox.paths.temp, 'logs')
+        const audit = await AuditLogger.create(logDirectory)
+        await sandbox.file(join(local, 'Temp', 'a.tmp'))
+        await sandbox.file(join(local, 'Temp', 'dir', 'b.tmp'))
+        const session = { audit, summary: newSummary(), dryRun: false, selectedCleaners: new Set<string>() }
+
+        await runUnattendedCleanup([new UserTempCleaner(sandbox.paths)], session)
+
+        expect(await readdir(sandbox.paths.temp)).toEqual(['logs'])
+        const log = await readFile(audit.path, 'utf8')
+        expect(log).toContain('"session-start"')
+        expect(log).toContain('"candidate-detected"')
+        expect(log).toContain('"entry-removed"')
+        expect(log).toContain('"entry-skipped"')
+        expect(session.summary.skippedEntries).toBe(1)
+        expect(session.summary.failures).toBe(0)
+    })
+})
+
+describe('running-app check', () => {
+    test('applies no process guard, because locked files are skipped instead', () => {
+        for (const cleaner of [new UserTempCleaner(sandbox.paths), new InternetCacheCleaner(sandbox.paths)]) {
+            expect(hasProcessGuard(cleaner.appId)).toBe(false)
+        }
+    })
 })

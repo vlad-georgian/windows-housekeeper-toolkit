@@ -70,7 +70,7 @@ describe('cleaner catalog', () => {
     })
 })
 
-describe('Windows temporary directories category', () => {
+describe('Windows temporary directory cleanup category', () => {
     test('selects only the per-user temporary cleaners when named', () => {
         const temporary = cleanersForCategories(catalog, ['windows-temp'])
         expect(temporary.map((cleaner) => cleaner.id)).toEqual(['user-temp', 'internet-cache'])

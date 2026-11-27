@@ -12,4 +12,8 @@ export class InternetCacheCleaner extends TemporaryContentsCleaner {
     protected get root(): string {
         return join(this.paths.localAppData, 'Microsoft', 'Windows', 'INetCache')
     }
+
+    protected get allowed(): readonly string[] {
+        return [this.root]
+    }
 }

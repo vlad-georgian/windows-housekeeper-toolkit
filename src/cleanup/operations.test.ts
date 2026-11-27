@@ -135,10 +135,10 @@ describe('old-installation cleanup operation', () => {
     })
 })
 
-describe('cache cleanup operation with Windows temporary directories', () => {
+describe('cache cleanup operation with Windows temporary directory cleanup', () => {
     const withTemp = [...catalog, fakeCleaner('user-temp', 'windows-temp', [8192], 'Files in use are skipped.')]
 
-    test('presents the temporary directories as the third checklist, unchecked', async () => {
+    test('presents Windows temporary directory cleanup as the third checklist, unchecked', async () => {
         const operations = createCleanupOperations(withTemp, session)
         const operation = required(operations.find((entry) => entry.id === 'caches'))
         const prompts = new FakePrompts([[], [], ['user-temp']])
@@ -147,10 +147,10 @@ describe('cache cleanup operation with Windows temporary directories', () => {
 
         expect(prompts.checklists.map((request) => request.options.map((o) => o.value))).toEqual([['codex'], ['npm'], ['user-temp']])
         for (const request of prompts.checklists) expect(request.initialValues).toEqual([])
-        expect(section.lines).toEqual(['Per-user Windows temporary directories', '  App user-temp: 1 target(s), 8.0 KiB. Files in use are skipped.'])
+        expect(section.lines).toEqual(['Windows temporary directory cleanup', '  App user-temp: 1 target(s), 8.0 KiB. Files in use are skipped.'])
     })
 
-    test('cancelling the temporary directories checklist cancels the operation', async () => {
+    test('cancelling the Windows temporary directory cleanup checklist cancels the operation', async () => {
         const operations = createCleanupOperations(withTemp, session)
         const operation = required(operations.find((entry) => entry.id === 'caches'))
         expect(await operation.gather(new FakePrompts([['codex'], ['npm'], null]))).toBe(cancelled)
@@ -175,6 +175,6 @@ describe('skipped entries', () => {
         const log = await readFile(session.audit.path, 'utf8')
         expect(log).toContain('"entry-skipped"')
         expect(log).toContain('locked.tmp')
-        expect(describeSummary(session.summary, false, session.audit.path)).toContain('1 locked or inaccessible entries skipped.')
+        expect(describeSummary(session.summary, false, session.audit.path)).toContain('Locked or inaccessible entries skipped: 1.')
     })
 })

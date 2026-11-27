@@ -1,3 +1,5 @@
+import { join } from 'node:path'
+
 import { TemporaryContentsCleaner } from './temporary-contents-cleaner.ts'
 
 export class UserTempCleaner extends TemporaryContentsCleaner {
@@ -9,5 +11,10 @@ export class UserTempCleaner extends TemporaryContentsCleaner {
 
     protected get root(): string {
         return this.paths.temp
+    }
+
+    // Per-session folders inside it qualify, but a TEMP elsewhere in the profile does not.
+    protected get allowed(): readonly string[] {
+        return [join(this.paths.localAppData, 'Temp')]
     }
 }

@@ -69,16 +69,16 @@ async function measureContents(path: string): Promise<{ sizeBytes: number; fileC
 /**
  * Offers the contents of one temporary directory as a single candidate, keeping the directory.
  *
- * The directory qualifies only when it is a real directory (not a link) inside `within`, and
- * it neither equals nor contains any protected path. Machine-wide temporary folders and a
- * `TEMP` that points at a profile root therefore never qualify. Returns null when the
- * directory is missing, unverifiable, or empty.
+ * This is an allowlist: the directory qualifies only when it is a real directory (not a link)
+ * whose real path equals one of the `allowed` conventional locations or lies inside one. A
+ * `TEMP` pointing at Documents, a source folder, the profile root, AppData, a drive root, or
+ * the machine-wide Windows\Temp therefore never qualifies. Returns null when the directory is
+ * missing, unverifiable, or empty.
  */
 export async function createContentsCandidate(options: {
     readonly id: string
     readonly root: string
-    readonly within: string
-    readonly protectedPaths: readonly string[]
+    readonly allowed: readonly string[]
     readonly displayName: string
     readonly reason: string
 }): Promise<CleanupCandidate | null> {
@@ -86,11 +86,8 @@ export async function createContentsCandidate(options: {
         const stats = await lstat(options.root, { bigint: true })
         if (!stats.isDirectory()) return null
         const canonicalRoot = await realpath(options.root)
-        if (!isPathInside(canonicalRoot, await canonicalOrResolved(options.within))) return null
-        for (const protectedPath of options.protectedPaths) {
-            const canonicalProtected = await canonicalOrResolved(protectedPath)
-            if (canonicalPathKey(canonicalProtected) === canonicalPathKey(canonicalRoot) || isPathInside(canonicalProtected, canonicalRoot)) return null
-        }
+        const permitted = await Promise.all(options.allowed.map(canonicalOrResolved))
+        if (!permitted.some((location) => canonicalPathKey(location) === canonicalPathKey(canonicalRoot) || isPathInside(canonicalRoot, location))) return null
         if ((await readdir(canonicalRoot)).length === 0) return null
 
         const measurement = await measureContents(canonicalRoot)
@@ -117,6 +114,8 @@ export async function createContentsCandidate(options: {
 interface Run {
     readonly callbacks: RemovalCallbacks
     readonly operations: ContentsOperations
+    /** Canonical keys of files that must stay, such as the active audit log. */
+    readonly protectedKeys: ReadonlySet<string>
     removedEntries: number
     reclaimedBytes: number
     skippedEntries: number
@@ -179,6 +178,12 @@ async function removeDirectory(run: Run, path: string, stats: Stats): Promise<vo
 async function removeEntry(run: Run, path: string): Promise<void> {
     try {
         const stats = await lstat(path)
+        // A directory that holds a protected file is cleared around it and keeps itself through the
+        // non-empty check, so only the file is reported.
+        if (!stats.isDirectory() && run.protectedKeys.has(canonicalPathKey(path))) {
+            await skip(run, path, new Error('Kept because this run is writing its audit log here'))
+            return
+        }
         if (stats.isSymbolicLink()) {
             await removeLink(run, path, stats)
         } else if (stats.isDirectory()) {
@@ -215,7 +220,8 @@ export async function removeContentsCandidate(
         throw new UnverifiedPathError(`${candidate.path} changed after detection.`)
     }
 
-    const run: Run = { callbacks, operations, removedEntries: 0, reclaimedBytes: 0, skippedEntries: 0 }
+    const protectedKeys = new Set(await Promise.all((callbacks.protectedPaths ?? []).map(async (path) => canonicalPathKey(await canonicalOrResolved(path)))))
+    const run: Run = { callbacks, operations, protectedKeys, removedEntries: 0, reclaimedBytes: 0, skippedEntries: 0 }
     for (const name of await readdir(candidate.canonicalPath)) await removeEntry(run, join(candidate.canonicalPath, name))
     return { removedEntries: run.removedEntries, reclaimedBytes: run.reclaimedBytes }
 }
