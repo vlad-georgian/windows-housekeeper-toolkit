@@ -9,7 +9,6 @@ import { errorMessage } from './core/format.ts'
 import { projectName, withRunLock } from './core/state.ts'
 import { getSystemPaths } from './core/system-paths.ts'
 import { runAppControls } from './windows/app-controls.ts'
-import { runMigration } from './windows/migration/index.ts'
 import { openNotificationLog } from './windows/notification.ts'
 import { runSignInSettings } from './windows/signin.ts'
 
@@ -23,9 +22,6 @@ async function main(): Promise<void> {
         case 'startup':
         case 'updates':
             await withRunLock(paths, () => runAppControls(args))
-            return
-        case 'migration':
-            await withRunLock(paths, () => runMigration(paths, rest))
             return
         case 'signin':
             if (rest.length === 1 && rest[0] === 'run') {
