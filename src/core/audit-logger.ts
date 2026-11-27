@@ -109,6 +109,10 @@ export class AuditLogger {
         })
     }
 
+    async recordRelocation(kind: string, details: AuditDetails): Promise<void> {
+        await this.write(`relocation-${kind}`, details)
+    }
+
     async recordStartupEnforcement(messages: readonly string[], failures: number): Promise<void> {
         await this.write('startup-preference-enforcement', { messages, failures })
     }
