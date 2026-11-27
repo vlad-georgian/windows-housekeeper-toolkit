@@ -1,7 +1,7 @@
 # windows-housekeeper-toolkit
 
 A Windows CLI for clearing redundant app files, managing app startup preferences,
-and moving eligible app data to another drive. Cleanup writes a JSON Lines audit log.
+and moving supported apps to another drive. Cleanup writes a JSON Lines audit log.
 
 ## Install and scan
 
@@ -104,24 +104,25 @@ runs. An app that starts before the task runs may already be open. If you move
 the workspace or replace the Bun executable, rerun the relevant enable
 command to refresh the task's paths.
 
-## Data migration
+## Moving apps to another drive
 
-```powershell
-vp run start migration status
-vp run start migration move codex-logs --destination E:\Codex-diagnostics
-vp run start migration rollback codex-logs
-```
+Choose **Move apps to another drive** in the launch menu to relocate GitHub
+Desktop's per-user installation and data, or VS Code's installed extensions.
+Apps that are already moved start checked. For newly checked apps, enter a
+base directory on another local drive. Each path is mirrored under the base,
+your Windows profile name, and its profile-relative path, so
+`C:\Users\you\AppData\Local\GitHubDesktop` moves to
+`E:\Software\you\AppData\Local\GitHubDesktop` with a base of `E:\Software`.
+The original path becomes a directory junction, so the app keeps working.
 
-Close Codex, including its desktop and background processes, before moving or
-restoring diagnostic logs. Run the command in a separate terminal. The
-destination must be on a different local drive and suitable for the files
-listed by migration status. The move verifies the copied files and Codex's
-`log_dir` setting before reclaiming the source. Rollback copies and verifies
-the latest diagnostic files back before restoring the prior setting. Use
-`migration resume codex-logs` if an operation is interrupted.
-
-Migration status reports other candidates and existing redirects, including
-Claude Desktop data already on E:.
+The CLI verifies the copied files, read-only flags, write access, and the
+junction before it removes the original copy. Clear a moved app to restore
+its latest files to the original paths. The restored copy is verified before
+the moved copy is removed. The plan reports running apps and existing
+destinations before any data changes. Close the apps before applying, or they
+are skipped. If a move or restore is interrupted, the app is held back and the
+CLI points to the recovery details in
+`%LOCALAPPDATA%\windows-housekeeper-toolkit\relocation-recovery.json`.
 
 ## Development
 
@@ -135,4 +136,4 @@ For a project-local Vite+ invocation on Windows, use
 `node node_modules/vite-plus/bin/vp` followed by the Vite+ command.
 
 See the [project documentation](docs/README.md) for the architecture, source
-file guide, dependency decisions, implementation spec, and migration decision.
+file guide, dependency decisions, implementation spec, and relocation decision.
