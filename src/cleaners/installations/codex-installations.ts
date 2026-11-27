@@ -1,40 +1,20 @@
 import { lstat, open, realpath } from 'node:fs/promises'
-import { basename, dirname, isAbsolute, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
-import { canonicalPathKey, createFilesystemCandidate, isPathInside, isUnavailablePath, listDirectoryNames } from '../../core/filesystem/index.ts'
+import { canonicalPathKey, createFilesystemCandidate, listDirectoryNames } from '../../core/filesystem/index.ts'
 import type { SystemPaths } from '../../core/system-paths.ts'
 import type { CleanupCandidate, RemovalResult } from '../../core/types.ts'
 import { listWindowsProcesses, type ProcessLister } from '../../windows/processes.ts'
-
-export type { ProcessLister }
 import { scoopRoot } from '../helpers.ts'
 import { canRemoveRelease, inspectReleaseStore, readManifest, storeNames } from './codex-release-store.ts'
+import { isPathInUse, runningProcessPaths } from './running-paths.ts'
+
+export type { ProcessLister }
 
 const npmRemnant = /^(?:\.codex-[\w-]+|codex-(?:old|backup|staging)-[\w-]+)$/i
 const packageProcess = /^(?:codex(?:-code-mode-host|-exec-server|-command-runner|-windows-sandbox-setup)?|rg)(?:\.exe)?$/i
 
-async function runningPackagePaths(listProcesses: ProcessLister): Promise<string[] | null> {
-    try {
-        const paths = new Set<string>()
-        for (const entry of await listProcesses()) {
-            if (!packageProcess.test(entry.name)) continue
-            if (!entry.path || !isAbsolute(entry.path)) return null
-            paths.add(entry.path)
-            try {
-                paths.add(await realpath(entry.path))
-            } catch (error) {
-                if (!isUnavailablePath(error)) throw error
-            }
-        }
-        return [...paths]
-    } catch {
-        return null
-    }
-}
-
-function releaseIsInUse(path: string, processPaths: readonly string[]): boolean {
-    return processPaths.some((processPath) => isPathInside(processPath, path))
-}
+const runningPackagePaths = (listProcesses: ProcessLister): Promise<string[] | null> => runningProcessPaths(listProcesses, packageProcess)
 
 async function codexNpmPackage(path: string, root: string): Promise<boolean> {
     const manifest = await readManifest(join(path, 'package.json'), root)
@@ -55,7 +35,7 @@ export async function detectCodexInstallations(codexHome: string, paths: SystemP
         if (!store) continue
         const logicalRoot = join(codexHome, 'packages', storeName, 'releases')
         for (const name of await listDirectoryNames(store.releases)) {
-            if (releaseIsInUse(join(store.releases, name), processes) || !(await canRemoveRelease(store, name))) {
+            if (isPathInUse(join(store.releases, name), processes) || !(await canRemoveRelease(store, name))) {
                 continue
             }
             const candidate = await createFilesystemCandidate({
@@ -82,7 +62,7 @@ export async function detectCodexInstallations(codexHome: string, paths: SystemP
                 reason: 'Interrupted npm update residue alongside the verified @openai/codex installation',
                 type: 'directory'
             })
-            if (candidate?.canonicalPath && !releaseIsInUse(candidate.canonicalPath, processes)) {
+            if (candidate?.canonicalPath && !isPathInUse(candidate.canonicalPath, processes)) {
                 candidates.push(candidate)
             }
         }
@@ -100,7 +80,7 @@ export async function removeCodexInstallation(
     if (!path) throw new Error(`Missing verified path for ${candidate.displayName}.`)
     const name = basename(path)
     const processes = await runningPackagePaths(listProcesses)
-    if (processes === null || releaseIsInUse(path, processes)) {
+    if (processes === null || isPathInUse(path, processes)) {
         throw new Error(`Could not verify that ${candidate.displayName} is inactive.`)
     }
 

@@ -1,17 +1,17 @@
-import { lstat, realpath } from 'node:fs/promises'
+import { lstat } from 'node:fs/promises'
 import { basename, join } from 'node:path'
 
 import { runCommand } from '../../core/command.ts'
-import { canonicalPathKey, createFilesystemCandidate, isPathInside, listDirectoryNames } from '../../core/filesystem/index.ts'
+import { canonicalPathKey, createFilesystemCandidate, listDirectoryNames } from '../../core/filesystem/index.ts'
 import type { SystemPaths } from '../../core/system-paths.ts'
 import type { CleanupCandidate, CommandRunner, RemovalCallbacks, RemovalResult } from '../../core/types.ts'
 import { compareVersions } from '../../core/versions.ts'
 import { listWindowsProcesses } from '../../windows/processes.ts'
 import { BaseCleaner } from '../base-cleaner.ts'
-import type { ProcessLister } from './codex-installations.ts'
-import { isPathInUse, runningProcessPaths } from './running-paths.ts'
+import { isPathInUse, type ProcessLister, runningProcessPaths } from './running-paths.ts'
 
 const versionName = /^\d+(?:\.\d+){1,3}(?:[-+].*)?$/
+const claudeProcess = /^claude(?:\.exe)?$/i
 
 export class ClaudeCodeInstallationCleaner extends BaseCleaner {
     readonly id = 'claude-code-versions'
@@ -38,16 +38,11 @@ export class ClaudeCodeInstallationCleaner extends BaseCleaner {
      * The active native version. Ask the native launcher itself, never `claude` on `PATH`, which
      * can resolve to a different installation such as an npm package.
      */
-    private async activeVersion(versionsRoot: string): Promise<string | null> {
+    private async activeVersion(): Promise<string | null> {
         const launcher = join(this.paths.home, '.local', 'bin', 'claude.exe')
         try {
-            const stats = await lstat(launcher)
-            if (stats.isSymbolicLink()) {
-                // A launcher linked into the versions directory names its version directly.
-                const target = await realpath(launcher)
-                return isPathInside(target, await realpath(versionsRoot)) && versionName.test(basename(target)) ? basename(target) : null
-            }
-            if (!stats.isFile()) return null
+            // The Windows installer copies the active binary to the launcher. A link is not that copy.
+            if (!(await lstat(launcher)).isFile()) return null
             const result = await this.commandRunner([launcher, '--version'])
             return result.exitCode === 0 ? (/^\s*(\d+(?:\.\d+){1,3})\b/.exec(result.stdout)?.[1] ?? null) : null
         } catch {
@@ -58,14 +53,14 @@ export class ClaudeCodeInstallationCleaner extends BaseCleaner {
     private async inspect(): Promise<{ root: string; active: string; versions: string[] } | null> {
         const root = this.versionsRoot()
         const versions = (await listDirectoryNames(root)).filter((name) => versionName.test(name))
-        const active = versions.length > 0 ? await this.activeVersion(root) : null
+        const active = versions.length > 0 ? await this.activeVersion() : null
         return active && versions.includes(active) ? { root, active, versions } : null
     }
 
     async detect(): Promise<readonly CleanupCandidate[]> {
         const installation = await this.inspect()
         if (!installation) return []
-        const processes = await runningProcessPaths(this.listProcesses)
+        const processes = await runningProcessPaths(this.listProcesses, claudeProcess)
         if (processes === null) return []
 
         // Newer versions are a staged update, so only versions older than the active one qualify.
@@ -88,7 +83,7 @@ export class ClaudeCodeInstallationCleaner extends BaseCleaner {
         if (candidate.id.startsWith(`${this.id}:version:`)) {
             const name = candidate.path ? basename(candidate.path) : null
             const installation = await this.inspect()
-            const processes = await runningProcessPaths(this.listProcesses)
+            const processes = await runningProcessPaths(this.listProcesses, claudeProcess)
             if (
                 !installation ||
                 processes === null ||
