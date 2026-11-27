@@ -55,8 +55,8 @@ Old-installation cleanup keeps only the selected release in each Codex release s
 update, and covers superseded native Claude Code binaries (judged by the native
 launcher, not `claude` on `PATH`), superseded Vite+ releases (in `VP_HOME`,
 `~\.vite-plus`, or `%LOCALAPPDATA%\vite-plus\data`, preserving the active
-release and the recorded rollback release, and skipped while the Vite+ installer
-runs), VS Code extension folders that VS Code marks obsolete and no longer lists
+release and the recorded rollback release, for Vite+ 1.7.0 and later, and skipped while
+the Vite+ installer runs), VS Code extension folders that VS Code marks obsolete and no longer lists
 as installed, Squirrel desktop apps such as GitHub Desktop and Discord, and
 updater payloads for installed updates. The
 default manual audit directory is `./logs`. Each file is named
