@@ -1,9 +1,8 @@
 import type { SystemPaths } from '../../core/system-paths.ts'
 import type { CleanupCandidate, RemovalCallbacks, RemovalResult } from '../../core/types.ts'
-import { listWindowsProcesses } from '../../windows/processes.ts'
+import { listWindowsProcesses, type ProcessLister } from '../../windows/processes.ts'
 import { BaseCleaner } from '../base-cleaner.ts'
 import { type Environment, scoopRoot } from '../helpers.ts'
-import type { ProcessLister } from './codex-installations.ts'
 import { detectScoopInstallations, prepareScoopRemoval } from './scoop-installations.ts'
 
 export class ScoopInstallationCleaner extends BaseCleaner {
