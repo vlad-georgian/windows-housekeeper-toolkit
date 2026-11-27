@@ -17,6 +17,14 @@ export const clackPrompts: LaunchPrompts = {
         const answer = await p.confirm({ message, initialValue: false })
         return p.isCancel(answer) ? null : answer
     },
+    async text({ message, placeholder, initialValue }) {
+        const answer = await p.text({
+            message,
+            ...(placeholder === undefined ? {} : { placeholder }),
+            ...(initialValue === undefined ? {} : { initialValue })
+        })
+        return p.isCancel(answer) ? null : answer
+    },
     note(title, lines) {
         p.note(lines.join('\n'), title)
     },

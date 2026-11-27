@@ -4,6 +4,12 @@ export interface ChecklistOption {
     readonly hint?: string
 }
 
+export interface TextRequest {
+    readonly message: string
+    readonly placeholder?: string
+    readonly initialValue?: string
+}
+
 export interface ChecklistRequest {
     readonly message: string
     readonly options: readonly ChecklistOption[]
@@ -14,6 +20,7 @@ export interface ChecklistRequest {
 export interface LaunchPrompts {
     checklist(request: ChecklistRequest): Promise<string[] | null>
     confirm(message: string): Promise<boolean | null>
+    text(request: TextRequest): Promise<string | null>
     note(title: string, lines: readonly string[]): void
     log(message: string): void
 }
