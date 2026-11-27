@@ -1,8 +1,13 @@
-import { lstat, realpath, stat } from 'node:fs/promises'
+import { lstat, stat } from 'node:fs/promises'
 import { basename, dirname, join, parse, relative, resolve, sep } from 'node:path'
 
 import { canonicalPathKey, isPathInside } from '../core/filesystem/index.ts'
-import { hasErrorCode } from '../core/filesystem/paths.ts'
+import { hasErrorCode, isUnavailablePath, UnverifiedPathError } from '../core/filesystem/paths.ts'
+import { errorMessage } from '../core/format.ts'
+import type { DriveKind, DriveTypeLookup } from '../windows/drives.ts'
+import { inspectDirectoryPath } from './directory-path.ts'
+
+export type { DriveKind, DriveTypeLookup } from '../windows/drives.ts'
 
 /** Whether two paths are stored on different volumes. Either path may not exist yet. */
 export type VolumeComparison = (first: string, second: string) => Promise<boolean>
@@ -46,11 +51,6 @@ export const differentVolumes: VolumeComparison = async (first, second) => {
     return statsA.dev !== statsB.dev
 }
 
-/** What kind of drive a root such as `E:\` is. Junctions need a base on a `fixed` drive. */
-export type DriveKind = 'fixed' | 'removable' | 'network' | 'substituted' | 'other'
-
-export type DriveTypeLookup = (root: string) => Promise<DriveKind>
-
 const driveDescriptions: Readonly<Record<Exclude<DriveKind, 'fixed'>, string>> = {
     removable: 'is a removable drive',
     network: 'is a network drive',
@@ -78,12 +78,12 @@ export async function validateRelocationBase(base: string, { home, originals, vo
         return 'Choose a base outside the Windows profile.'
     }
 
-    const existing = await nearestExistingPath(resolved)
-    const stats = await lstat(existing)
-    if (stats.isSymbolicLink() || canonicalPathKey(await realpath(existing)) !== canonicalPathKey(existing)) {
-        return `${existing} resolves through a link. Choose its real location instead.`
+    try {
+        await inspectDirectoryPath(resolved)
+    } catch (error) {
+        if (error instanceof UnverifiedPathError || isUnavailablePath(error)) return `${errorMessage(error)}. Choose another base.`
+        throw error
     }
-    if (!stats.isDirectory()) return `${existing} is not a directory.`
 
     for (const original of originals) {
         if (!(await volumesDiffer(resolved, original))) return `Choose a base on another drive than ${parse(resolve(original)).root}.`

@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
-import { access, chmod, copyFile, lstat, mkdir, readdir, rmdir, unlink, utimes, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, lstat, mkdir, open, readdir, rmdir, unlink, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+
+import { requireDirectoryIdentity } from './directory-path.ts'
 
 /** A directory tree holds something relocation cannot copy faithfully yet, such as a link. */
 export class UnsupportedTreeError extends Error {}
@@ -95,33 +97,41 @@ export async function verifyTreeContents(root: string, manifest: TreeManifest): 
     if (difference) throw new Error(`Verification failed at ${root}: ${difference}.`)
 }
 
-/**
- * Throws unless the tree at `root` matches `manifest` and the current user can use it: every
- * directory accepts writes and every file can be read, or written when it is not read-only.
- */
-export async function verifyTree(root: string, manifest: TreeManifest): Promise<void> {
-    await verifyTreeContents(root, manifest)
-    const probe = join(root, `.windows-housekeeper-toolkit-${randomUUID()}.probe`)
+async function verifyDirectoryWrites(directory: string): Promise<void> {
+    await requireDirectory(directory)
+    const probe = join(directory, `.windows-housekeeper-toolkit-${randomUUID()}.probe`)
     try {
         await writeFile(probe, '', { flag: 'wx' })
+        await unlink(probe)
     } catch (error) {
-        throw new Error(`The current user cannot write to ${root}.`, { cause: error })
+        throw new Error(`The current user cannot create and remove a test file in ${directory}.`, { cause: error })
     }
-    await unlink(probe)
+}
+
+/** Verifies contents and tests actual write access, including Windows ACLs. */
+export async function verifyTree(root: string, manifest: TreeManifest): Promise<void> {
+    await verifyTreeContents(root, manifest)
+    await verifyDirectoryWrites(root)
     for (const entry of manifest.entries) {
-        const mode = entry.kind === 'directory' || !entry.readOnly ? constants.R_OK | constants.W_OK : constants.R_OK
-        try {
-            await access(join(root, entry.path), mode)
-        } catch (error) {
-            throw new Error(`The current user cannot use ${join(root, entry.path)}.`, { cause: error })
+        const path = join(root, entry.path)
+        if (entry.kind === 'directory') await verifyDirectoryWrites(path)
+        else if (!entry.readOnly) {
+            // The content check already read every file. Open for writing without modifying it.
+            try {
+                const handle = await open(path, 'r+')
+                await handle.close()
+            } catch (error) {
+                throw new Error(`The current user cannot open ${path} for writing.`, { cause: error })
+            }
         }
     }
 }
 
 /** Copies a plain directory tree to a new `target`, preserving read-only flags and file times. */
-export async function copyTree(source: string, target: string): Promise<void> {
+export async function copyTree(source: string, target: string, onCreated?: () => Promise<void>): Promise<void> {
     await requireDirectory(source)
     await mkdir(target)
+    await onCreated?.()
     await walk(source, async (entry, absolute) => {
         const destination = join(target, entry.path)
         if (entry.kind === 'directory') {
@@ -136,8 +146,10 @@ export async function copyTree(source: string, target: string): Promise<void> {
 }
 
 /** Removes a tree after verifying it still matches `manifest`, so no unexpected data is lost. */
-export async function removeTree(root: string, manifest: TreeManifest): Promise<void> {
+export async function removeTree(root: string, manifest: TreeManifest, identity?: string): Promise<void> {
+    if (identity !== undefined) await requireDirectoryIdentity(root, identity)
     await verifyTreeContents(root, manifest)
+    if (identity !== undefined) await requireDirectoryIdentity(root, identity)
     await removeVerifiedTree(root)
 }
 

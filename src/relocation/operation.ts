@@ -1,12 +1,15 @@
 import { resolve } from 'node:path'
 
 import { pathExists } from '../core/filesystem/index.ts'
+import { isUnavailablePath, UnverifiedPathError } from '../core/filesystem/paths.ts'
 import { errorMessage, formatBytes } from '../core/format.ts'
 import { cancelled, type Cancelled, type LaunchOperation, type LaunchPrompts, type PlanSection } from '../launch/types.ts'
+import type { DriveTypeLookup } from '../windows/drives.ts'
 import { isAppRunning, type WindowsProcess } from '../windows/processes.ts'
+import { type DirectoryIdentity, inspectDestinationPath } from './directory-path.ts'
 import { type AppInspection, inspectApp, moveSteps } from './inspect.ts'
 import type { RecoveryJournal } from './journal.ts'
-import { type DriveTypeLookup, validateRelocationBase, type VolumeComparison } from './layout.ts'
+import { validateRelocationBase, type VolumeComparison } from './layout.ts'
 import { IncompleteTransferError, moveDirectory, restoreDirectory, type TransferResult } from './transfer.ts'
 import { measureTree, UnsupportedTreeError } from './tree.ts'
 import type { RelocatableApp } from './types.ts'
@@ -40,6 +43,7 @@ export interface RelocationOptions {
 interface PathTransfer {
     readonly original: string
     readonly destination: string
+    readonly destinationDirectories: readonly DirectoryIdentity[]
 }
 
 /** One app's part of the plan: move its local paths under a base, or restore its linked paths. */
@@ -54,6 +58,15 @@ interface AppAction {
 type AppPlan = { readonly action: AppAction; readonly lines: readonly string[] } | { readonly blocked: string }
 
 const title = 'Move apps to another drive'
+
+async function planDestination(base: string, destination: string, action: 'move' | 'restore'): Promise<{ directories: readonly DirectoryIdentity[] } | { blocked: string }> {
+    try {
+        return { directories: await inspectDestinationPath(base, destination, action) }
+    } catch (error) {
+        if (error instanceof UnverifiedPathError || isUnavailablePath(error)) return { blocked: errorMessage(error) }
+        throw error
+    }
+}
 
 /** A tree's size for the plan, or why it cannot be relocated yet. */
 async function sizeOf(path: string): Promise<{ size: string } | { blocked: string }> {
@@ -103,6 +116,8 @@ async function planMove(inspection: AppInspection, base: string, home: string): 
     const transfers: PathTransfer[] = []
     for (const step of moveSteps(inspection, base, home)) {
         if (step.kind === 'blocked') return { blocked: step.reason }
+        const destination = await planDestination(base, step.destination, step.kind === 'in-place' ? 'restore' : 'move')
+        if ('blocked' in destination) return destination
         if (step.kind === 'in-place') {
             lines.push(`  ${step.path} already links to ${step.destination}`)
             continue
@@ -111,7 +126,7 @@ async function planMove(inspection: AppInspection, base: string, home: string): 
         const size = await sizeOf(step.path)
         if ('blocked' in size) return size
         lines.push(`  ${step.path} → ${step.destination} (${size.size})`)
-        transfers.push({ original: step.path, destination: step.destination })
+        transfers.push({ original: step.path, destination: step.destination, destinationDirectories: destination.directories })
     }
     return { action: { app: inspection.app, action: 'move', base, transfers }, lines }
 }
@@ -123,10 +138,12 @@ async function planRestore(inspection: AppInspection, base: string): Promise<App
     for (const entry of inspection.applicable) {
         if (entry.state.kind === 'local') continue
         if (entry.state.kind !== 'linked') return { blocked: `${entry.path} is not linked` }
+        const destination = await planDestination(base, entry.state.target, 'restore')
+        if ('blocked' in destination) return destination
         const size = await sizeOf(entry.state.target)
         if ('blocked' in size) return size
         lines.push(`  ${entry.state.target} → ${entry.path} (${size.size})`)
-        transfers.push({ original: entry.path, destination: entry.state.target })
+        transfers.push({ original: entry.path, destination: entry.state.target, destinationDirectories: destination.directories })
     }
     return { action: { app: inspection.app, action: 'restore', base, transfers }, lines }
 }
@@ -146,10 +163,10 @@ async function applyAction(action: AppAction, prompts: LaunchPrompts, options: R
     }
     const transfer = action.action === 'move' ? moveDirectory : restoreDirectory
     const completed: string[] = []
-    for (const [index, { original, destination }] of action.transfers.entries()) {
+    for (const [index, { original, destination, destinationDirectories }] of action.transfers.entries()) {
         let result: TransferResult
         try {
-            result = await transfer({ appId: app.id, original, destination, base: action.base }, { journal: options.journal })
+            result = await transfer({ appId: app.id, original, destination, base: action.base }, { journal: options.journal, destinationDirectories })
         } catch (error) {
             const notAttempted = action.transfers.slice(index + 1).map((entry) => entry.original)
             prompts.log(`${app.label}: ${errorMessage(error)}`)
@@ -181,7 +198,9 @@ export function createRelocationOperation(options: RelocationOptions): LaunchOpe
             const held = new Set<string>()
             for (const record of await options.journal.list()) {
                 held.add(record.appId)
-                prompts.log(`An interrupted ${record.action} of ${record.original} needs attention. Recovery details are in ${options.journal.location}.`)
+                prompts.log(
+                    `An interrupted ${record.action} of ${record.original} needs attention (${record.phase}, record ${record.id}). Close the app and preserve the copies listed in ${options.journal.location}. See "Recovering an interrupted relocation" in the README.`
+                )
             }
             const inspections: AppInspection[] = []
             for (const app of options.catalog) {

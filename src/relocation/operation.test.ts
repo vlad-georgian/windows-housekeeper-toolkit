@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { lstat, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { lstat, readdir, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { pathExists } from '../core/filesystem/index.ts'
@@ -119,6 +119,35 @@ describe('moving apps to another drive', () => {
         expect(prompts.logs.some((message) => message.includes('already exists'))).toBe(true)
         expect((await lstat(desktopInstall())).isSymbolicLink()).toBe(false)
         expect(await readFile(join(mirrored(desktopData()), 'existing.json'), 'utf8')).toBe('keep')
+    })
+
+    test('refuses to plan a move through a junction below the relocation base', async () => {
+        await sandbox.directory('E/Software')
+        const outside = await sandbox.directory('Elsewhere')
+        await symlink(outside, join(base, 'test'), 'junction')
+        const prompts = new FakePrompts([['github-desktop'], base])
+
+        expect(await operation(true).gather(prompts)).toBeNull()
+        expect(prompts.logs).toContainEqual(expect.stringContaining('resolves through a link'))
+        expect(await readdir(outside)).toEqual([])
+    })
+
+    test.each(['junction', 'directory'] as const)('refuses a planned move after a parent is replaced by a %s', async (replacement) => {
+        const parent = await sandbox.directory('E/Software/test')
+        const replacementPath = await sandbox.directory('Elsewhere')
+        const prompts = new FakePrompts([['github-desktop'], base])
+        const section = planned(await operation().gather(prompts))
+
+        await rename(parent, join(base, 'old-test'))
+        if (replacement === 'junction') await symlink(replacementPath, parent, 'junction')
+        else await rename(replacementPath, parent)
+
+        await section.apply()
+
+        expect((await lstat(desktopInstall())).isSymbolicLink()).toBe(false)
+        expect(await readdir(parent)).toEqual([])
+        expect(events).toMatchObject([{ kind: 'failed', original: desktopInstall() }])
+        expect(await journal.list()).toEqual([])
     })
 
     test('reports a partial move when a later path fails and offers recovery in the checklist', async () => {

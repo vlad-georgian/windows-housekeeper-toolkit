@@ -1,5 +1,9 @@
-import type { DriveKind } from '../relocation/layout.ts'
 import { runPowerShell } from './powershell.ts'
+
+/** The type of a Windows drive root, with substituted drives identified separately. */
+export type DriveKind = 'fixed' | 'removable' | 'network' | 'substituted' | 'other'
+
+export type DriveTypeLookup = (root: string) => Promise<DriveKind>
 
 const kinds: Readonly<Record<string, DriveKind>> = {
     Fixed: 'fixed',

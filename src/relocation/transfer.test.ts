@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { chmod, link, lstat, readdir, readFile, readlink, realpath, stat, symlink, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { chmod, link, lstat, readdir, readFile, readlink, realpath, rename, stat, symlink, writeFile } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
 
 import { pathExists } from '../core/filesystem/index.ts'
 import { projectName } from '../core/state.ts'
@@ -15,11 +15,11 @@ let original: string
 let destination: string
 let base: string
 
-async function addAppFiles(): Promise<void> {
-    await sandbox.file('Users/test/AppData/Local/GitHubDesktop/Update.exe', 'updater')
-    await sandbox.file('Users/test/AppData/Local/GitHubDesktop/app-3.4.0/GitHubDesktop.exe', 'desktop')
-    await sandbox.directory('Users/test/AppData/Local/GitHubDesktop/packages')
-    const readOnly = await sandbox.file('Users/test/AppData/Local/GitHubDesktop/app-3.4.0/locked.dat', 'read-only')
+async function addAppFiles(directory = 'Users/test/AppData/Local/GitHubDesktop'): Promise<void> {
+    await sandbox.file(join(directory, 'Update.exe'), 'updater')
+    await sandbox.file(join(directory, 'app-3.4.0', 'GitHubDesktop.exe'), 'desktop')
+    await sandbox.directory(join(directory, 'packages'))
+    const readOnly = await sandbox.file(join(directory, 'app-3.4.0', 'locked.dat'), 'read-only')
     await chmod(readOnly, 0o444)
 }
 
@@ -71,6 +71,94 @@ describe('moving a directory', () => {
         expect(await rejection(moveDirectory({ appId: 'github-desktop', original, destination, base }, { journal }))).toBeInstanceOf(DestinationConflictError)
         expect((await lstat(original)).isDirectory()).toBe(true)
         expect(await readdir(destination)).toEqual(['other.txt'])
+    })
+
+    test('preserves a competing destination with identical contents when placement fails', async () => {
+        const attempt = moveDirectory(
+            { appId: 'github-desktop', original, destination, base },
+            {
+                journal,
+                async beforePhase(phase) {
+                    if (phase === 'swapping') await addAppFiles('E/Software/test/AppData/Local/GitHubDesktop')
+                }
+            }
+        )
+
+        expect(await rejection(attempt)).toBeInstanceOf(DestinationConflictError)
+        expect(await readFile(join(destination, 'Update.exe'), 'utf8')).toBe('updater')
+        expect((await lstat(original)).isSymbolicLink()).toBe(false)
+        expect(await journal.list()).toEqual([])
+    })
+
+    test('holds the recovery record if a newly created destination parent becomes a junction before placement', async () => {
+        const parent = dirname(destination)
+        const savedParent = join(sandbox.root, 'SavedParent')
+        const outside = await sandbox.directory('Elsewhere')
+
+        const error = await rejection(
+            moveDirectory(
+                { appId: 'github-desktop', original, destination, base },
+                {
+                    journal,
+                    async beforePhase(phase) {
+                        if (phase !== 'swapping') return
+                        await rename(parent, savedParent)
+                        await symlink(outside, parent, 'junction')
+                    }
+                }
+            )
+        )
+
+        expect(error).toBeInstanceOf(IncompleteTransferError)
+        const [record] = await journal.list()
+        if (!record) throw new Error('Expected the interrupted move to keep its record.')
+        const savedCopy = join(savedParent, basename(record.staging))
+        await chmod(join(savedCopy, 'app-3.4.0', 'locked.dat'), 0o666)
+        expect(await readFile(join(savedCopy, 'Update.exe'), 'utf8')).toBe('updater')
+        expect(await readdir(outside)).toEqual([])
+        expect((await lstat(original)).isSymbolicLink()).toBe(false)
+    })
+
+    test('keeps the source copy if an identical directory replaces the placed tree', async () => {
+        const savedCopy = join(sandbox.root, 'SavedCopy')
+        const error = await rejection(
+            moveDirectory(
+                { appId: 'github-desktop', original, destination, base },
+                {
+                    journal,
+                    async beforePhase(phase) {
+                        if (phase !== 'reclaiming') return
+                        await rename(destination, savedCopy)
+                        await chmod(join(savedCopy, 'app-3.4.0', 'locked.dat'), 0o666)
+                        await addAppFiles('E/Software/test/AppData/Local/GitHubDesktop')
+                    }
+                }
+            )
+        )
+
+        expect(error).toBeInstanceOf(IncompleteTransferError)
+        const [record] = await journal.list()
+        if (!record?.aside) throw new Error('Expected the interrupted move to keep its source copy.')
+        await chmod(join(record.aside, 'app-3.4.0', 'locked.dat'), 0o666)
+        expect(await readFile(join(record.aside, 'Update.exe'), 'utf8')).toBe('updater')
+        expect(await readFile(join(destination, 'Update.exe'), 'utf8')).toBe('updater')
+    })
+
+    test('undo removes its placed copy when the original changed during copying', async () => {
+        const attempt = moveDirectory(
+            { appId: 'github-desktop', original, destination, base },
+            {
+                journal,
+                async beforePhase(phase) {
+                    if (phase === 'swapping') await writeFile(join(original, 'Update.exe'), 'changed in use')
+                }
+            }
+        )
+
+        expect(await rejectionMessage(attempt)).toContain('Update.exe differs')
+        expect(await readFile(join(original, 'Update.exe'), 'utf8')).toBe('changed in use')
+        expect(await pathExists(destination)).toBe(false)
+        expect(await journal.list()).toEqual([])
     })
 
     test('refuses trees that contain links or hard-linked files', async () => {

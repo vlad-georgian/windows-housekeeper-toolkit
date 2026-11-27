@@ -1,11 +1,11 @@
 import { appendFile, mkdir } from 'node:fs/promises'
 import { parse, resolve } from 'node:path'
 
-import type { RelocationEvent } from '../relocation/operation.ts'
 import { projectName } from './state.ts'
 import type { CleanupCandidate, RemovedEntry, SkippedEntry } from './types.ts'
 
 type AuditDetails = Record<string, unknown>
+type RelocationAuditKind = 'moved' | 'restored' | 'previewed' | 'skipped' | 'failed'
 
 export class AuditLogger {
     private constructor(readonly path: string) {}
@@ -110,7 +110,7 @@ export class AuditLogger {
         })
     }
 
-    async recordRelocation(kind: RelocationEvent['kind'], details: AuditDetails): Promise<void> {
+    async recordRelocation(kind: RelocationAuditKind, details: AuditDetails): Promise<void> {
         await this.write(`relocation-${kind}`, details)
     }
 
