@@ -108,21 +108,45 @@ command to refresh the task's paths.
 
 Choose **Move apps to another drive** in the launch menu to relocate GitHub
 Desktop's per-user installation and data, or VS Code's installed extensions.
-Apps that are already moved start checked. For newly checked apps, enter a
-base directory on another local drive. Each path is mirrored under the base,
+Migrated applications start checked. For newly checked apps, enter a
+base directory on another fixed local drive. Each path is mirrored under the base,
 your Windows profile name, and its profile-relative path, so
 `C:\Users\you\AppData\Local\GitHubDesktop` moves to
 `E:\Software\you\AppData\Local\GitHubDesktop` with a base of `E:\Software`.
 The original path becomes a directory junction, so the app keeps working.
 
 The CLI verifies the copied files, read-only flags, write access, and the
-junction before it removes the original copy. Clear a moved app to restore
-its latest files to the original paths. The restored copy is verified before
-the moved copy is removed. The plan reports running apps and existing
-destinations before any data changes. Close the apps before applying, or they
-are skipped. If a move or restore is interrupted, the app is held back and the
-CLI points to the recovery details in
+junction before it removes the original copy. Clear a migrated application to
+restore its latest files to the original paths. The CLI verifies the restored
+copy before removing the relocated copy. Empty parent folders are kept.
+
+An application with both local paths and paths mirrored under one base appears
+as partially migrated. Check it to finish moving to that base, or leave it
+clear to restore the relocated paths. If one path fails during a move or
+restore, the CLI reports which paths finished and where it stopped. The plan
+reports running apps and existing destinations before any data changes. Close
+the apps before applying, or they are skipped. If a transfer leaves a recovery
+record, the CLI holds back that application and points to
 `%LOCALAPPDATA%\windows-housekeeper-toolkit\relocation-recovery.json`.
+
+### Reverting a legacy Codex diagnostic-log move
+
+If you previously ran `migration move codex-logs`, close Codex, ChatGPT, and
+the Codex app-server before restoring the logs. Find the recorded `home` and
+`destination` in `%LOCALAPPDATA%\windows-housekeeper-toolkit\migration-codex-logs.json`.
+For a completed move, copy `logs_2.sqlite` and any accompanying `-wal`, `-shm`,
+and `-journal` files together from the destination to the recorded `home`
+directory, usually `%USERPROFILE%\.codex`. Copy `codex-tui.log`, if present, into
+its `log` subdirectory. If the move was interrupted or you are unsure which
+copy is current, retain both copies and the journal while checking the migration
+state. Before copying back a verified set of logs, move any existing files at
+those paths to a separate backup directory so the SQLite files stay together.
+
+Verify the restored files against the destination, then remove the toolkit's
+`log_dir` line from `config.toml` in the recorded `home`. It is marked with
+`# windows-housekeeper-toolkit` followed by the migration ID. Restart Codex and
+confirm it writes logs at the original locations before archiving the old
+destination and journal.
 
 ## Development
 

@@ -60,9 +60,21 @@ An application update that can run while the app is closed.
 
 A reversible move of a supported application's installation and data directories to another drive while keeping them accessible at their original paths.
 
+**Relocation base**
+
+The user-selected directory on another drive under which **Application relocation** stores the mirrored paths.
+
+**Mirrored path**
+
+A relocated path that preserves its original location relative to the Windows profile, under the profile name in the **Relocation base**.
+
 **Migrated application**
 
-A supported application whose configured paths all resolve through links to their destinations under the chosen relocation base.
+A supported application whose applicable configured paths all resolve through links to their mirrored paths under one **Relocation base**.
+
+**Recovery record**
+
+A saved description of one transfer's phase and file locations used to recover interrupted **Application relocation**.
 
 **Protected data**
 
