@@ -4,7 +4,7 @@ import { chmod, copyFile, lstat, mkdir, open, readdir, rmdir, unlink, utimes, wr
 import { basename, dirname, join } from 'node:path'
 
 import { readWindowsFilePermissions } from '../windows/file-permissions.ts'
-import { reclaimWindowsTree, type ReclamationEntry, type ReclamationGuard } from '../windows/reclaim-tree.ts'
+import { nativeEntryIdentity, reclaimWindowsTree, type ReclamationEntry, type ReclamationGuard } from '../windows/reclaim-tree.ts'
 import { type DirectoryIdentity, requireDirectoryIdentity } from './directory-path.ts'
 
 /** A directory tree holds something relocation cannot copy faithfully yet, such as a link. */
@@ -184,14 +184,10 @@ async function reclamationEntries(root: string, manifest: TreeManifest): Promise
         if (!permissions || stats.ino === 0n || stats.isSymbolicLink() || (kind === 'directory' ? !stats.isDirectory() : !stats.isFile())) {
             throw new Error(`Cannot verify the entry at ${path}.`)
         }
-        // Win32 FILETIME counts 100 ns intervals from 1601, while Bun's birthtimeNs uses the Unix epoch.
-        const created = String(stats.birthtimeNs / 100n + 116_444_736_000_000_000n)
         entries.push({
             path,
             directory: kind === 'directory',
-            inode: String(stats.ino),
-            volume: String(stats.dev),
-            created,
+            ...nativeEntryIdentity(stats),
             hash: entry?.sha256 ?? null,
             readOnly: entry?.readOnly ?? false,
             permissions,

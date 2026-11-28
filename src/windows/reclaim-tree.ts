@@ -1,4 +1,19 @@
+import type { BigIntStats } from 'node:fs'
+
+import { fileIndex, volumeSerial } from '../core/filesystem/paths.ts'
 import { runPowerShell } from './powershell.ts'
+
+/**
+ * The identity fields `Verify` compares, in the unsigned form `GetFileInformationByHandle`
+ * reports. Win32 FILETIME counts 100 ns intervals from 1601; Bun's birthtimeNs uses the Unix epoch.
+ */
+export function nativeEntryIdentity(stats: Pick<BigIntStats, 'dev' | 'ino' | 'birthtimeNs'>): { inode: string; volume: string; created: string } {
+    return {
+        inode: String(fileIndex(stats)),
+        volume: String(volumeSerial(stats)),
+        created: String(stats.birthtimeNs / 100n + 116_444_736_000_000_000n)
+    }
+}
 
 export interface ReclamationEntry {
     readonly path: string

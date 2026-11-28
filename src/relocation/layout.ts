@@ -2,7 +2,7 @@ import { lstat, stat } from 'node:fs/promises'
 import { basename, dirname, join, parse, relative, resolve, sep } from 'node:path'
 
 import { canonicalPathKey, isPathInside } from '../core/filesystem/index.ts'
-import { hasErrorCode, isUnavailablePath, UnverifiedPathError } from '../core/filesystem/paths.ts'
+import { hasErrorCode, isUnavailablePath, UnverifiedPathError, volumeSerial } from '../core/filesystem/paths.ts'
 import { errorMessage } from '../core/format.ts'
 import type { DriveKind, DriveTypeLookup } from '../windows/drives.ts'
 import { inspectDirectoryPath } from './directory-path.ts'
@@ -48,7 +48,7 @@ export async function nearestExistingPath(path: string): Promise<string> {
 export const differentVolumes: VolumeComparison = async (first, second) => {
     const [a, b] = await Promise.all([nearestExistingPath(first), nearestExistingPath(second)])
     const [statsA, statsB] = await Promise.all([stat(a, { bigint: true }), stat(b, { bigint: true })])
-    return statsA.dev !== statsB.dev
+    return volumeSerial(statsA) !== volumeSerial(statsB)
 }
 
 const driveDescriptions: Readonly<Record<Exclude<DriveKind, 'fixed'>, string>> = {
