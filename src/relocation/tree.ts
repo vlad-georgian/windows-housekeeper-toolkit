@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 
 import { canonicalPathKey, entryIdentity, isPathInside } from '../core/filesystem/paths.ts'
 import { readWindowsFilePermissions } from '../windows/file-permissions.ts'
-import { reparsePointKind } from '../windows/kernel32.ts'
+import { reparsePointKind, setLinkReadOnly } from '../windows/kernel32.ts'
 import { nativeEntryIdentity, readReparsePermissions, reclaimWindowsTree, type ReclamationEntry, type ReclamationGuard, type ReparseLink } from '../windows/reclaim-tree.ts'
 import { inspectDirectoryPath, type DirectoryIdentity } from './directory-path.ts'
 
@@ -29,6 +29,12 @@ interface TreeEntry {
 
 export interface TreeManifest {
     readonly root: string
+    /**
+     * Other names for the represented root, such as the original path that links to a relocated
+     * tree. A link payload under one of them is internal, relative to the root, in every inventory
+     * of the transfer, so the source and the copy classify it the same way.
+     */
+    readonly equivalentRoots?: readonly string[]
     readonly permissions: readonly string[]
     readonly entries: readonly TreeEntry[]
     readonly bytes: number
@@ -86,7 +92,8 @@ function supportedLinkKind(path: string, directoryTarget: boolean): 'junction' |
 }
 
 /** Inventory the root itself (which may be a launcher file), then its children without descending into links. */
-async function inventory(root: string, representedRoot: string, hashContents: boolean): Promise<Omit<TreeManifest, 'permissions'>> {
+async function inventory(root: string, representedRoot: string, hashContents: boolean, equivalentRoots: readonly string[] = []): Promise<Omit<TreeManifest, 'permissions'>> {
+    const aliases = equivalentRoots.filter((other) => canonicalPathKey(other) !== canonicalPathKey(representedRoot))
     const entries: TreeEntry[] = []
     const seen = new Map<string, TreeEntry>()
     let bytes = 0
@@ -99,13 +106,19 @@ async function inventory(root: string, representedRoot: string, hashContents: bo
         if (stats.isSymbolicLink()) {
             if (!path) throw new UnsupportedTreeError(`${absolute} is a link, not a physical transfer root.`)
             const raw = await readlink(absolute)
-            const targetPath = resolve(dirname(join(representedRoot, path)), raw)
+            const spelled = resolve(dirname(join(representedRoot, path)), raw)
+            // A payload spelled through another name of the root, such as one Scoop writes through the
+            // original path while relocated, names the same tree.
+            const alias = aliases.find((other) => isPathInside(spelled, other))
+            const targetPath = alias ? join(representedRoot, relative(alias, spelled)) : spelled
             const internal = isPathInside(targetPath, representedRoot)
             const target = internal ? relative(representedRoot, targetPath) : targetPath
             // A staging copy may contain a junction addressed to its final name. Inspect its counterpart in staging.
             const backing = await linkTargetStats(root, representedRoot, targetPath).catch(() => null)
             if (!backing || (!backing.isDirectory() && !backing.isFile())) throw new UnsupportedTreeError(`${absolute} is a link with an unavailable target.`)
-            entries.push({ ...common, kind: supportedLinkKind(absolute, backing.isDirectory()), target, internal, payload: raw })
+            // Scoop marks its junctions read-only (`attrib +R /L`) to guard them against recursive deletes.
+            const readOnly = (stats.mode & 0o200n) === 0n
+            entries.push({ ...common, kind: supportedLinkKind(absolute, backing.isDirectory()), target, internal, payload: raw, readOnly })
             return
         }
         if (canonicalPathKey(await realpath(absolute)) !== canonicalPathKey(absolute)) throw new UnsupportedTreeError(`${absolute} has a linked parent.`)
@@ -135,7 +148,7 @@ async function inventory(root: string, representedRoot: string, hashContents: bo
         }
     }
     await visit('')
-    return { root: representedRoot, entries, bytes, files }
+    return { root: representedRoot, entries, bytes, files, ...(equivalentRoots.length > 0 && { equivalentRoots }) }
 }
 
 function countFiles(manifest: Pick<TreeManifest, 'entries'>, seen: Set<string>): { bytes: number; files: number } {
@@ -154,13 +167,65 @@ export async function measureTree(root: string, seen = new Set<string>()): Promi
     return countFiles(await inventory(root, root, false), seen)
 }
 
-export async function snapshotTree(root: string): Promise<TreeManifest> {
-    const manifest = await inventory(root, root, true)
+/** A file with hard-link names outside the inventoried trees. */
+export interface ExternalHardLink {
+    /** The first name found inside the trees. */
+    readonly path: string
+    /** The trees that hold a name of this file. */
+    readonly roots: readonly string[]
+    readonly bytes: number
+}
+
+/**
+ * Files under `roots` whose link count exceeds the names found under all of them. A copy on
+ * another drive cannot keep those outside names linked to the moved data.
+ */
+export async function externalHardLinks(roots: readonly string[]): Promise<ExternalHardLink[]> {
+    const manifests = []
+    for (const root of roots) manifests.push(await inventory(root, root, false))
+    return externalHardLinksIn(manifests)
+}
+
+/** The same check over inventories already taken, such as a transfer's verified snapshot. */
+export function externalHardLinksIn(manifests: readonly Pick<TreeManifest, 'root' | 'entries'>[]): ExternalHardLink[] {
+    const files = new Map<string, { path: string; roots: Set<string>; links: number; names: number; bytes: number }>()
+    for (const { root, entries } of manifests) {
+        for (const entry of entries) {
+            if (entry.kind !== 'file' || entry.links < 2) continue
+            const known = files.get(entry.identity)
+            if (known) {
+                known.names++
+                known.roots.add(root)
+            } else files.set(entry.identity, { path: join(root, entry.path), roots: new Set([root]), links: entry.links, names: 1, bytes: entry.bytes })
+        }
+    }
+    return [...files.values()].filter((file) => file.links > file.names).map(({ path, roots: owners, bytes }) => ({ path, roots: [...owners], bytes }))
+}
+
+/**
+ * The first link whose copy would be classified differently from its source: a payload written
+ * under `finalRoot` that no longer lands inside it, or an external payload that would. Checked
+ * before copying, so a mismatch refuses up front instead of after a full copy.
+ */
+export function inconsistentLink(manifest: TreeManifest, finalRoot: string): string | null {
+    for (const entry of manifest.entries) {
+        if (entry.target === null) continue
+        const written = entry.internal ? join(finalRoot, entry.target) : entry.target
+        const resolved = resolve(dirname(join(finalRoot, entry.path)), written)
+        const aliases = (manifest.equivalentRoots ?? []).filter((other) => canonicalPathKey(other) !== canonicalPathKey(finalRoot))
+        const internal = isPathInside(resolved, finalRoot) || aliases.some((other) => isPathInside(resolved, other))
+        if (internal !== entry.internal) return join(manifest.root, entry.path)
+    }
+    return null
+}
+
+export async function snapshotTree(root: string, equivalentRoots: readonly string[] = []): Promise<TreeManifest> {
+    const manifest = await inventory(root, root, true, equivalentRoots)
     return { ...manifest, permissions: await readPermissions(root, manifest.entries) }
 }
 
 export async function verifyTreeContents(root: string, manifest: TreeManifest, representedRoot = manifest.root, sameObjects = false): Promise<TreeManifest> {
-    const actual = await inventory(root, representedRoot, true)
+    const actual = await inventory(root, representedRoot, true, manifest.equivalentRoots)
     if (actual.entries.length !== manifest.entries.length) throw new Error(`Verification failed at ${root}: entry count changed.`)
     for (const [index, entry] of manifest.entries.entries()) {
         const other = actual.entries[index]
@@ -277,6 +342,7 @@ export async function copyTree(source: string, target: string, manifest: TreeMan
         if (entry.kind === 'directory') await mkdir(destination)
         else if (entry.target !== null) {
             await symlink(entry.internal ? join(finalRoot, entry.target) : entry.target, destination, entry.kind === 'junction' ? 'junction' : 'file')
+            if (entry.readOnly) setLinkReadOnly(destination)
         } else if (entry.alias !== null) await hardLink(join(target, entry.alias), destination)
         else {
             const prior = previous?.get(entry.identity)

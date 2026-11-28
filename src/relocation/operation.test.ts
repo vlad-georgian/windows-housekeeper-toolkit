@@ -6,6 +6,7 @@ import { pathExists } from '../core/filesystem/index.ts'
 import { cancelled, type PlanSection } from '../launch/types.ts'
 import { FakePrompts } from '../test-support/fake-prompts.ts'
 import { createSandbox, type Sandbox } from '../test-support/fixtures.ts'
+import { isolatedPackageSources } from '../test-support/package-sources.ts'
 import type { WindowsProcess } from '../windows/processes.ts'
 import { createRelocationCatalog } from './apps/index.ts'
 import { createRecoveryJournal, type RecoveryJournal } from './journal.ts'
@@ -33,7 +34,7 @@ function operation(
 ): ReturnType<typeof createRelocationOperation> {
     return createRelocationOperation({
         home: sandbox.paths.home,
-        catalog: createRelocationCatalog(sandbox.paths),
+        catalog: createRelocationCatalog(sandbox.paths, isolatedPackageSources),
         journal,
         dryRun,
         listProcesses: async () => processes,
@@ -90,7 +91,7 @@ test.each(['same volume', 'network drive'] as const)('leaves a mirrored junction
 test('blocks only an application with out-of-profile data', async () => {
     const redirected = await sandbox.directory('Redirected')
     await sandbox.file('Redirected/GitHub Desktop/window-state.json', '{}')
-    const catalog = createRelocationCatalog({ ...sandbox.paths, roamingAppData: redirected })
+    const catalog = createRelocationCatalog({ ...sandbox.paths, roamingAppData: redirected }, isolatedPackageSources)
     const prompts = new FakePrompts([['github-desktop', 'vscode-extensions'], base])
 
     const section = planned(await operation(true, undefined, { catalog }).gather(prompts))

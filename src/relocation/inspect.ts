@@ -6,6 +6,7 @@ import { entryIdentity, hasErrorCode, isPathInside, isUnavailablePath, Unverifie
 import { errorMessage } from '../core/format.ts'
 import { windowsDriveType } from '../windows/drives.ts'
 import { inspectDirectoryPath, storedLinkTarget } from './directory-path.ts'
+import type { MirrorOwner } from './journal.ts'
 import { type BaseValidationOptions, differentVolumes, mirroredPath, relocationBaseOf, validateRelocationBase } from './layout.ts'
 import type { RelocatableApp, RelocationPath } from './types.ts'
 
@@ -27,6 +28,11 @@ export type PathState =
 export interface InspectedPath extends RelocationPath {
     readonly verifiedLegacy?: boolean
     readonly nativeDependency?: boolean
+    /**
+     * The toolkit recorded this link, but the app's ownership evidence is gone, for example after
+     * the last global package was removed. The path can be restored but not moved again.
+     */
+    readonly unverifiedOwnership?: true
     readonly state: PathState
 }
 
@@ -78,13 +84,27 @@ export async function inspectPath(path: string, kind: RelocationPath['kind'] = '
 export async function inspectApp(
     app: RelocatableApp,
     home: string,
-    validation: Pick<BaseValidationOptions, 'driveType' | 'volumesDiffer'> = { driveType: windowsDriveType, volumesDiffer: differentVolumes }
+    validation: RelocationValidation = { driveType: windowsDriveType, volumesDiffer: differentVolumes }
 ): Promise<AppInspection | { blocked: string }> {
+    if (app.blocked) return { blocked: app.blocked }
     const outside = app.paths.find((entry) => !isPathInside(entry.path, home))
     if (outside) return { blocked: `${outside.path} is outside the Windows profile ${home}` }
     const inspected: InspectedPath[] = []
     for (const entry of app.paths) {
         let state = await inspectPath(entry.path, entry.kind, entry.verifyLegacyTarget)
+        let unverifiedOwnership = false
+        if (entry.verifyDirectory || entry.recordedOnly) {
+            // Optional package paths need positive evidence before they are offered. A link the
+            // toolkit recorded stays visible, so its data can always be restored or explained.
+            const recorded = state.kind === 'linked' || state.kind === 'unsupported' ? await validation.owner?.(entry.path) : undefined
+            if (state.kind === 'unsupported' && !recorded) continue
+            if (state.kind === 'linked' && !relocationBaseOf(state.target, home, entry.path)) continue
+            const owned = async (target: string): Promise<boolean> => !entry.recordedOnly && !!(await entry.verifyDirectory?.(target))
+            if ((state.kind === 'local' || state.kind === 'linked') && !(await owned(state.kind === 'linked' ? state.target : entry.path))) {
+                if (state.kind !== 'linked' || !recordedMirror(recorded, state)) continue
+                unverifiedOwnership = true
+            }
+        }
         if (entry.verifyFile && (state.kind === 'local' || state.kind === 'linked') && !(await entry.verifyFile(state.kind === 'linked' ? state.target : entry.path))) {
             state = { kind: 'unsupported', reason: `Could not verify the app owns ${entry.path}` }
         }
@@ -93,7 +113,7 @@ export async function inspectApp(
             !!entry.verifyLegacyTarget &&
             basename(state.target).toLowerCase() === basename(entry.path).toLowerCase() &&
             (await entry.verifyLegacyTarget(state.target))
-        inspected.push({ ...entry, state, verifiedLegacy })
+        inspected.push({ ...entry, state, verifiedLegacy, ...(unverifiedOwnership && { unverifiedOwnership: true }) })
     }
     const applicable = inspected
         .filter((entry) => entry.state.kind !== 'missing')
@@ -102,7 +122,25 @@ export async function inspectApp(
             const root = owner?.state.kind === 'linked' ? owner.state.target : owner?.state.kind === 'local' ? owner.path : undefined
             return Object.assign(entry, { nativeDependency: !!root && entry.state.kind === 'linked' && isPathInside(entry.state.target, root) })
         })
+    return summarizeApp(app, applicable, home, validation)
+}
 
+type RelocationValidation = Pick<BaseValidationOptions, 'driveType' | 'volumesDiffer'> & {
+    /** The toolkit's identity receipt for a destination it created. */
+    readonly owner?: (original: string) => Promise<MirrorOwner | undefined>
+}
+
+/** Whether the toolkit's receipt proves it created the directory this link targets. */
+export function recordedMirror(owner: MirrorOwner | undefined, link: OriginalLink): boolean {
+    return !!owner && !owner.forwarding && owner.identity === link.targetIdentity && canonicalPathKey(owner.path) === canonicalPathKey(link.target)
+}
+
+async function summarizeApp(
+    app: RelocatableApp,
+    applicable: readonly InspectedPath[],
+    home: string,
+    validation: RelocationValidation
+): Promise<AppInspection | { blocked: string }> {
     const nonLocal = applicable.filter((entry) => entry.state.kind !== 'local')
     for (const { state } of nonLocal) if (state.kind === 'unsupported') return { blocked: state.reason }
     const bases = nonLocal.map((entry) => (entry.state.kind === 'linked' && !entry.state.indirect ? relocationBaseOf(entry.state.target, home, entry.path) : null))
@@ -118,6 +156,53 @@ export async function inspectApp(
     }
     const migratedBase = nonLocal.length === applicable.length ? restoreBase : null
     return { app, applicable, migratedBase, restoreBase }
+}
+
+function physicalTree(entry: InspectedPath): string | null {
+    if (entry.kind === 'file') return null
+    if (entry.state.kind === 'local') return entry.path
+    return entry.state.kind === 'linked' ? entry.state.target : null
+}
+
+/** Give exact names and descendants to one catalog owner before building the checklist.
+ * Distinct names with overlapping backing trees need independent target ownership. */
+export async function claimRelocationPaths(
+    inspections: readonly AppInspection[],
+    home: string,
+    validation: RelocationValidation
+): Promise<(AppInspection | { blocked: string })[]> {
+    const entries = inspections.flatMap((inspection) => inspection.applicable)
+    const claimed: InspectedPath[] = []
+    for (const entry of entries.toSorted((a, b) => a.path.length - b.path.length)) {
+        if (claimed.some((owner) => physicalTree(owner) !== null && isPathInside(entry.path, owner.path))) continue
+        const duplicate = claimed.findIndex((owner) => canonicalPathKey(owner.path) === canonicalPathKey(entry.path))
+        if (duplicate === -1) claimed.push(entry)
+        else if (claimed[duplicate]?.state.kind === 'unsupported' && entry.state.kind !== 'unsupported') claimed[duplicate] = entry
+    }
+    const conflicts = new Map<InspectedPath, string>()
+    for (const [index, entry] of claimed.entries()) {
+        const tree = physicalTree(entry)
+        if (!tree) continue
+        for (const other of claimed.slice(index + 1)) {
+            const backing = physicalTree(other)
+            if (backing && (canonicalPathKey(tree) === canonicalPathKey(backing) || isPathInside(tree, backing) || isPathInside(backing, tree))) {
+                conflicts.set(entry, other.path)
+                conflicts.set(other, entry.path)
+            }
+        }
+    }
+    const owners = new Set(claimed)
+    return Promise.all(
+        inspections.map(async ({ app, applicable }) => {
+            const paths: InspectedPath[] = []
+            for (const entry of applicable) {
+                if (!owners.has(entry)) continue
+                const conflict = conflicts.get(entry)
+                paths.push(conflict ? { ...entry, state: { kind: 'unsupported', reason: `${entry.path} shares a backing tree with ${conflict}` } } : entry)
+            }
+            return summarizeApp(app, paths, home, validation)
+        })
+    )
 }
 
 /** What moving one applicable path under `base` involves. */

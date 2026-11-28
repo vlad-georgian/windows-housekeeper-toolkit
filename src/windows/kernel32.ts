@@ -9,6 +9,8 @@ let library: ReturnType<typeof openKernel32> | undefined
 function openKernel32() {
     return dlopen('kernel32.dll', {
         MoveFileExW: { args: [FFIType.ptr, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
+        GetFileAttributesW: { args: [FFIType.ptr], returns: FFIType.u32 },
+        SetFileAttributesW: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
         FindFirstFileW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.u64 },
         FindClose: { args: [FFIType.u64], returns: FFIType.i32 },
         GetLastError: { args: [], returns: FFIType.u32 },
@@ -108,4 +110,21 @@ export function reparsePointKind(path: string): ReparsePointKind | null {
     if (tag === mountPointTag) return 'junction'
     if (tag === symlinkTag) return attributes & directoryAttribute ? 'directory-symlink' : 'file-symlink'
     return 'other'
+}
+
+const readOnlyAttribute = 0x1
+const invalidAttributes = 0xffff_ffff
+
+/**
+ * Marks a junction or symbolic link itself read-only, as `attrib +R /L` does. Windows applies
+ * `SetFileAttributesW` to the reparse point, not its target.
+ */
+export function setLinkReadOnly(path: string): void {
+    const symbols = kernel32()
+    symbols.SetLastError(0)
+    const attributes = symbols.GetFileAttributesW(wide(path))
+    if (attributes === invalidAttributes) throw windowsError(`Could not read the attributes of ${path}`, lastError())
+    if (!(attributes & reparseAttribute)) throw new Error(`${path} is not a link.`)
+    symbols.SetLastError(0)
+    if (!symbols.SetFileAttributesW(wide(path), attributes | readOnlyAttribute)) throw windowsError(`Could not mark ${path} read-only`, lastError())
 }

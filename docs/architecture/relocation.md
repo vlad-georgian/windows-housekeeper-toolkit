@@ -54,6 +54,72 @@ Codex’s visible bin keeps targeting the original standalone selector when its
 payload matches the selected release store. Links to unavailable targets and
 read-only hard links block the transfer.
 
+## Package-manager ownership
+
+The catalog verifies package paths inside the profile before offering them and
+rechecks ownership at apply time. Standalone Node.js needs a Node executable
+and a bundled npm manifest in a known per-user installation directory.
+
+Each manager's locations come from its own configuration: Scoop's
+`config.json`, npm's user and bundled npmrc files, and Bun's global
+`bunfig.toml`. Environment variables are read from the injected catalog
+sources, never from the ambient process. When two sources disagree, or a file
+cannot be read, the manager is not offered and the checklist log gives the
+reason.
+
+A path the toolkit relocated keeps its identity receipt in
+`relocation-destinations.json`, with the app that moved it and the original
+path. Receipts, not the current configuration, decide what a restore covers.
+When the app's ownership evidence disappears, its configured location changes,
+or its configuration now blocks it, the receipt keeps each relocated path in
+the checklist so it can be restored, but not moved again. A restore that
+leaves any recorded or configured path of the app linked under its base is
+reported as failed. Receipts from earlier versions name no app; a path they
+record that still links to its mirror is logged.
+
+- Scoop moves its whole root after verifying the Scoop launcher in a release
+  under `apps`. Scoop persists directories as junctions and files as hard
+  links between a version in `apps` and `persist`, on every later install or
+  update too. A hard link cannot span drives, so `apps` and `persist` move as
+  one tree and stay on one volume. The mover re-creates the internal
+  junctions and hard links, and junctions from outside keep resolving through
+  the root's link. Scoop is held back while a file in the root has a hard-link
+  name outside it. Planning checks this, and the transfer checks the same
+  snapshot it verifies and reclaims.
+  Receipt-only restores keep that policy. While relocated, Scoop spells new
+  junctions through its original root. A transfer treats a payload under the
+  original path or the mirror as internal to the tree, so the source and the
+  copy classify it the same way, and it refuses a link the copy would classify
+  differently before anything is copied. Links keep their read-only attribute,
+  which Scoop sets with `attrib +R /L`. Every Scoop root, the default
+  `~scoop` included, must hold only Scoop's own folders: `apps`, `buckets`,
+  `cache`, `persist`, `shims`, `modules` and `workspace`. Any other entry, even
+  a stray file, holds Scoop back with the entries listed. A root that moved
+  before this check stays restorable through its receipt.
+  [Scoop folder layout](https://github.com/ScoopInstaller/Scoop/wiki/Scoop-Folder-Layout)
+- Vite+ verifies the launcher and active release manifest before moving its
+  managed releases and runtimes. The shared launcher directory stays in place.
+  [Vite+ Windows installation](https://github.com/voidzero-dev/vite-plus/blob/main/CONTRIBUTING.md#windows)
+- npm moves verified global `node_modules` and the npm content cache.
+  The prefix's launcher files stay in place.
+  [npm folders](https://docs.npmjs.com/cli/configuring-npm/folders/)
+- Bun checks the global installation manifest and lockfile. It can also move
+  a verified download cache when that cache has no shared global store.
+  Existing global launchers keep their paths. Bun hard-links installed files to
+  its cache, so both trees move in one action and keep those links. The plan
+  counts files that also have names elsewhere, such as project installs. Those
+  names keep their own copies on the original drive.
+  [Bun configuration](https://bun.com/docs/runtime/bunfig)
+- Chocolatey verifies the user-profile installation layout and checks the
+  machine setting before offering to move the package library. The binary
+  and shims stay in place.
+  [Chocolatey non-administrative installation](https://docs.chocolatey.org/en-us/choco/setup/#non-administrative-install)
+
+The planner gives a configured path and its descendants to one catalog owner
+before building the checklist. This keeps an npm prefix inside Scoop or Vite+
+with the manager. Distinct roots that point into overlapping backing trees
+are held back until their ownership is unambiguous.
+
 ## Moving a directory
 
 1. Check that the destination is below the relocation base and its ancestor

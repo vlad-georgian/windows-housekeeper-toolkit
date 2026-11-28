@@ -43,6 +43,10 @@ export interface MirrorOwner {
     readonly path: string
     readonly identity: string
     readonly forwarding?: true
+    /** The app that relocated the original. Receipts from earlier versions have none. */
+    readonly appId?: string
+    /** The original path as the transfer saw it. Receipts are keyed by its canonical form. */
+    readonly original?: string
 }
 
 /** Recovery records for incomplete relocation transfers. */
@@ -54,6 +58,8 @@ export interface RecoveryJournal {
     /** Identity of the mirror created for this original by a completed transfer. */
     owner(original: string): Promise<MirrorOwner | undefined>
     setOwner(original: string, owner: MirrorOwner | null): Promise<void>
+    /** Every receipt, keyed by the canonical original path. */
+    owners(): Promise<ReadonlyMap<string, MirrorOwner>>
     list(): Promise<RecoveryRecord[]>
     save(record: RecoveryRecord): Promise<void>
     remove(id: string): Promise<void>
@@ -95,7 +101,13 @@ export function createRecoveryJournal(paths: SystemPaths): RecoveryJournal {
         for (const [key, owner] of Object.entries(value)) {
             if (typeof owner !== 'object' || !owner || !('identity' in owner) || typeof owner.identity !== 'string' || !('path' in owner) || typeof owner.path !== 'string')
                 throw new Error('Invalid relocation destination identity.')
-            owners.set(key, { path: owner.path, identity: owner.identity, ...('forwarding' in owner && owner.forwarding === true && { forwarding: true }) })
+            owners.set(key, {
+                path: owner.path,
+                identity: owner.identity,
+                ...('forwarding' in owner && owner.forwarding === true && { forwarding: true }),
+                ...('appId' in owner && typeof owner.appId === 'string' && { appId: owner.appId }),
+                ...('original' in owner && typeof owner.original === 'string' && { original: owner.original })
+            })
         }
         return owners
     }
@@ -113,6 +125,7 @@ export function createRecoveryJournal(paths: SystemPaths): RecoveryJournal {
             await writeState(paths, aliasesName, state)
         },
         owner: async (original) => (await readOwners()).get(canonicalPathKey(original)),
+        owners: readOwners,
         async setOwner(original, owner) {
             const owners = await readOwners()
             if (owner) owners.set(canonicalPathKey(original), owner)

@@ -107,8 +107,13 @@ command to refresh the task's paths.
 ## Moving apps to another drive
 
 Choose **Move apps to another drive** in the launch menu for Codex, Claude Code,
-Claude Desktop, GitHub Desktop, or VS Code extensions. The catalog covers
-per-user installations and data. Windows manages the packaged app binaries.
+Claude Desktop, GitHub Desktop, VS Code extensions, or verified per-user Node.js,
+Vite+, npm, Bun, Scoop, and Chocolatey paths. Scoop and Vite+ carry the
+runtimes they manage, and package launchers keep their original paths. Scoop
+moves its whole folder, so its apps and their persistent data stay on one
+drive and Scoop can keep hard-linking persisted settings. Scoop moves only
+when its folder holds nothing but Scoop's own folders. Windows manages the
+packaged app binaries.
 Migrated applications start checked. For newly checked apps, enter a
 base directory on another fixed local drive. Each path is mirrored under the base,
 your Windows profile name, and its profile-relative path, so
