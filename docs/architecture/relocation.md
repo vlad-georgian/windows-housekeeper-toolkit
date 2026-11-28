@@ -68,19 +68,24 @@ cannot be read, the manager is not offered and the checklist log gives the
 reason.
 
 A path the toolkit relocated keeps its identity receipt in
-`relocation-destinations.json`. When the app's ownership evidence later
-disappears, for example after the last npm global package is removed, the
-receipt keeps that path in the checklist so it can be restored, but not moved
-again. A restore that leaves any app path linked under its base is reported as
-failed.
+`relocation-destinations.json`, with the app that moved it and the original
+path. Receipts, not the current configuration, decide what a restore covers.
+When the app's ownership evidence disappears, its configured location changes,
+or its configuration now blocks it, the receipt keeps each relocated path in
+the checklist so it can be restored, but not moved again. A restore that
+leaves any recorded or configured path of the app linked under its base is
+reported as failed. Receipts from earlier versions name no app; a path they
+record that still links to its mirror is logged.
 
-- Scoop moves `apps` after verifying the Scoop launcher in a release under
-  that tree. Its `shims` and `persist` directories stay at their original
-  locations. The mover re-creates version junctions and keeps app links to
-  persistent data pointed at their existing targets. Scoop persists files as
-  hard links between a version and `persist`, and a link cannot span drives.
-  Scoop is held back, at planning and again at apply time, while any file in
-  `apps` has a hard-link name outside it.
+- Scoop moves its whole root after verifying the Scoop launcher in a release
+  under `apps`. Scoop persists directories as junctions and files as hard
+  links between a version in `apps` and `persist`, on every later install or
+  update too. A hard link cannot span drives, so `apps` and `persist` move as
+  one tree and stay on one volume. The mover re-creates the internal
+  junctions and hard links, and junctions from outside keep resolving through
+  the root's link. Scoop is held back while a file in the root has a hard-link
+  name outside it. Planning checks this, and the transfer checks the same
+  snapshot it verifies and reclaims.
   [Scoop folder layout](https://github.com/ScoopInstaller/Scoop/wiki/Scoop-Folder-Layout)
 - Vite+ verifies the launcher and active release manifest before moving its
   managed releases and runtimes. The shared launcher directory stays in place.

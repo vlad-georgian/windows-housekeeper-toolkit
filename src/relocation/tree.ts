@@ -168,9 +168,16 @@ export interface ExternalHardLink {
  * another drive cannot keep those outside names linked to the moved data.
  */
 export async function externalHardLinks(roots: readonly string[]): Promise<ExternalHardLink[]> {
+    const manifests = []
+    for (const root of roots) manifests.push(await inventory(root, root, false))
+    return externalHardLinksIn(manifests)
+}
+
+/** The same check over inventories already taken, such as a transfer's verified snapshot. */
+export function externalHardLinksIn(manifests: readonly Pick<TreeManifest, 'root' | 'entries'>[]): ExternalHardLink[] {
     const files = new Map<string, { path: string; roots: Set<string>; links: number; names: number; bytes: number }>()
-    for (const root of roots) {
-        for (const entry of (await inventory(root, root, false)).entries) {
+    for (const { root, entries } of manifests) {
+        for (const entry of entries) {
             if (entry.kind !== 'file' || entry.links < 2) continue
             const known = files.get(entry.identity)
             if (known) {

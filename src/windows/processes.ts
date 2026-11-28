@@ -7,6 +7,8 @@ export interface WindowsProcess {
     readonly commandLine?: string | null
     /** The parent process ID, when Windows reports it. */
     readonly parentId?: number | null
+    /** When the process started, as an ISO 8601 time, when Windows reports it. */
+    readonly createdAt?: string | null
 }
 
 export type ProcessLister = () => Promise<readonly WindowsProcess[]>
@@ -23,7 +25,8 @@ function isWindowsProcess(value: unknown): value is WindowsProcess {
         (typeof value.path === 'string' || value.path === null) &&
         'commandLine' in value &&
         (typeof value.commandLine === 'string' || value.commandLine === null) &&
-        (!('parentId' in value) || typeof value.parentId === 'number' || value.parentId === null)
+        (!('parentId' in value) || typeof value.parentId === 'number' || value.parentId === null) &&
+        (!('createdAt' in value) || typeof value.createdAt === 'string' || value.createdAt === null)
     )
 }
 
@@ -35,8 +38,9 @@ export async function listWindowsProcesses(): Promise<WindowsProcess[]> {
         try {
             output = await runPowerShell(
                 `
-        $items = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine | ForEach-Object {
-          @{ id = [int]$_.ProcessId; parentId = [int]$_.ParentProcessId; name = [string]$_.Name; path = $_.ExecutablePath; commandLine = $_.CommandLine }
+        $items = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, CreationDate, Name, ExecutablePath, CommandLine | ForEach-Object {
+          $created = if ($_.CreationDate) { $_.CreationDate.ToUniversalTime().ToString('o') } else { $null }
+          @{ id = [int]$_.ProcessId; parentId = [int]$_.ParentProcessId; createdAt = $created; name = [string]$_.Name; path = $_.ExecutablePath; commandLine = $_.CommandLine }
         })
         ConvertTo-Json -InputObject $items -Compress
       `,

@@ -1,4 +1,4 @@
-import { readlink, realpath } from 'node:fs/promises'
+import { lstat, readlink, realpath } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import { pathExists } from '../core/filesystem/index.ts'
@@ -9,11 +9,11 @@ import type { DriveTypeLookup } from '../windows/drives.ts'
 import { isAppRunning, type WindowsProcess } from '../windows/processes.ts'
 import { type DirectoryIdentity, inspectDestinationPath, readDirectoryIdentity } from './directory-path.ts'
 import { type AppInspection, claimRelocationPaths, type OriginalLink, inspectApp, inspectPath, moveSteps, recordedMirror } from './inspect.ts'
-import type { RecoveryJournal } from './journal.ts'
+import type { MirrorOwner, RecoveryJournal } from './journal.ts'
 import { relocationBaseOf, validateRelocationBase, type VolumeComparison } from './layout.ts'
 import { IncompleteTransferError, linksTo, moveDirectory, restoreDirectory, type TransferResult } from './transfer.ts'
 import { type CopiedFiles, externalHardLinks, measureTree, UnsupportedTreeError } from './tree.ts'
-import type { RelocatableApp } from './types.ts'
+import type { RelocatableApp, RelocationPath } from './types.ts'
 
 /** An outcome of applying, or previewing, one app's relocation. */
 export type RelocationEvent =
@@ -128,17 +128,24 @@ async function checklistHint(inspection: AppInspection): Promise<string> {
     return `${formatBytes(bytes)} local${linked > 0 ? `, ${linked} path(s) already linked` : ''}`
 }
 
+function startedBefore(parent: WindowsProcess, child: WindowsProcess): boolean {
+    const parentStarted = Date.parse(parent.createdAt ?? '')
+    const childStarted = Date.parse(child.createdAt ?? '')
+    return Number.isFinite(parentStarted) && Number.isFinite(childStarted) && parentStarted <= childStarted
+}
+
 /**
  * The toolkit's own process and the launcher wrappers that started it, such as `vp run start`
- * and `bun run`. The chain ends at the first ancestor that is not a launcher. Without parent
- * process IDs, only the toolkit itself is exempt.
+ * and `bun run`. The chain ends at the first ancestor that is not a launcher, or that did not
+ * start before its child, because Windows reuses the ID of a parent that has exited. Without
+ * parent IDs and start times, only the toolkit itself is exempt.
  */
 export function toolkitProcessIds(processes: readonly WindowsProcess[], self = process.pid): ReadonlySet<number> {
     const byId = new Map(processes.map((entry) => [entry.id, entry]))
     const own = new Set([self])
     for (let current = byId.get(self); typeof current?.parentId === 'number' && !own.has(current.parentId);) {
         const parent = byId.get(current.parentId)
-        if (!parent || !/^(vp|vpr|bun|node)\.exe$/iu.test(parent.name)) break
+        if (!parent || !/^(vp|vpr|bun|node)\.exe$/iu.test(parent.name) || !startedBefore(parent, current)) break
         own.add(parent.id)
         current = parent
     }
@@ -392,6 +399,7 @@ async function applyAction(action: AppAction, prompts: LaunchPrompts, options: R
                         if (aliases.size) await recordAliases(aliases)
                     },
                     ...(nativeDependency && { trackRootAlias: true }),
+                    ...(entry?.hardLinks === 'refuse-external' && { containedHardLinks: true }),
                     ...(linkTargets && { linkTargets }),
                     ...(app.preserveMirror && { preserveMirror: true })
                 }
@@ -416,7 +424,7 @@ async function applyAction(action: AppAction, prompts: LaunchPrompts, options: R
     }
     if (copiedFiles.size) await recordAliases(new Map())
     if (action.action === 'restore') {
-        const remaining = await stillRelocated(app, action.base, options.home)
+        const remaining = await stillRelocated(app, action.base, options.home, options.journal)
         if (remaining.length > 0) {
             for (const path of remaining) prompts.log(`${app.label}: ${path} still links under ${action.base}.`)
             prompts.log('Return to the relocation checklist to restore the remaining paths after fixing the problem.')
@@ -429,14 +437,82 @@ async function applyAction(action: AppAction, prompts: LaunchPrompts, options: R
 }
 
 /** The app's paths that still link to its mirror under `base` after a restore. */
-async function stillRelocated(app: RelocatableApp, base: string, home: string): Promise<string[]> {
-    const remaining: string[] = []
+async function stillRelocated(app: RelocatableApp, base: string, home: string, journal: RecoveryJournal): Promise<string[]> {
+    const remaining = new Map<string, string>()
     for (const entry of app.paths) {
         const state = await inspectPath(entry.path, entry.kind)
         const linkedBase = state.kind === 'linked' ? relocationBaseOf(state.target, home, entry.path) : null
-        if (linkedBase && canonicalPathKey(linkedBase) === canonicalPathKey(base)) remaining.push(entry.path)
+        if (linkedBase && canonicalPathKey(linkedBase) === canonicalPathKey(base)) remaining.set(canonicalPathKey(entry.path), entry.path)
     }
-    return remaining
+    // A path the app relocated may no longer be in its configured paths, for example after the
+    // npm prefix changed. The toolkit's receipts still name it.
+    for (const [key, receipt] of await journal.owners()) {
+        if (receipt.appId !== app.id || receipt.forwarding || remaining.has(key)) continue
+        const original = receipt.original ?? key
+        const state = await inspectPath(original, (await recordedKind(receipt)) ?? 'directory')
+        if (state.kind === 'linked' && isPathInside(state.target, base)) remaining.set(key, original)
+    }
+    return [...remaining.values()]
+}
+
+async function recordedKind(receipt: MirrorOwner): Promise<'file' | undefined> {
+    try {
+        return (await lstat(receipt.path)).isFile() ? 'file' : undefined
+    } catch (error) {
+        if (isUnavailablePath(error)) return undefined
+        throw error
+    }
+}
+
+/** The paths this app relocated, from the toolkit's receipts, as restore-only catalog paths. */
+async function recordedPaths(app: RelocatableApp, receipts: ReadonlyMap<string, MirrorOwner>): Promise<RelocationPath[]> {
+    const paths: RelocationPath[] = []
+    for (const [key, receipt] of receipts) {
+        if (receipt.appId !== app.id || receipt.forwarding) continue
+        const kind = await recordedKind(receipt)
+        paths.push({ path: receipt.original ?? key, description: 'relocated path', recordedOnly: true, ...(kind && { kind }) })
+    }
+    return paths
+}
+
+/**
+ * Inspects one catalog app with its recorded paths. When the app is blocked, by its
+ * configuration or a path, the paths it already relocated are still offered for restore.
+ */
+async function inspectWithReceipts(
+    app: RelocatableApp,
+    receipts: ReadonlyMap<string, MirrorOwner>,
+    prompts: LaunchPrompts,
+    options: RelocationOptions,
+    quiet: boolean
+): Promise<AppInspection | null> {
+    const validation = { ...options, owner: (original: string) => options.journal.owner(original) }
+    const recorded = await recordedPaths(app, receipts)
+    const extra = recorded.filter((entry) => !app.paths.some((path) => canonicalPathKey(path.path) === canonicalPathKey(entry.path)))
+    const inspection = app.blocked ? { blocked: app.blocked } : await inspectApp(extra.length > 0 ? { ...app, paths: [...app.paths, ...extra] } : app, options.home, validation)
+    if (!('blocked' in inspection)) return inspection
+    if (!quiet) prompts.log(`${app.label} cannot be relocated. ${inspection.blocked}`)
+    if (recorded.length === 0) return null
+    // Blocking stops a new move, never a restore of what the toolkit already relocated.
+    const restoreOnly: RelocatableApp = { id: app.id, label: app.label, processGuardId: app.processGuardId, paths: recorded, ...(app.preserveMirror && { preserveMirror: true }) }
+    const fallback = await inspectApp(restoreOnly, options.home, validation)
+    if ('blocked' in fallback) {
+        if (!quiet) prompts.log(`${app.label}'s relocated paths cannot be restored yet. ${fallback.blocked}`)
+        return null
+    }
+    if (fallback.applicable.length > 0 && !quiet) prompts.log(`${app.label}'s relocated paths can still be restored. Leave it clear to restore them.`)
+    return fallback
+}
+
+/** Receipts from earlier versions name no app. Report those whose original still links to its mirror. */
+async function reportUnattributedReceipts(receipts: ReadonlyMap<string, MirrorOwner>, catalog: readonly RelocatableApp[], prompts: LaunchPrompts): Promise<void> {
+    const known = new Set(catalog.flatMap((app) => app.paths.map((entry) => canonicalPathKey(entry.path))))
+    for (const [key, receipt] of receipts) {
+        if (receipt.appId || receipt.forwarding || known.has(key)) continue
+        const original = receipt.original ?? key
+        const state = await inspectPath(original, (await recordedKind(receipt)) ?? 'directory')
+        if (state.kind === 'linked' && recordedMirror(receipt, state)) prompts.log(`${original} still links to ${receipt.path}. Keep that drive until the path is restored.`)
+    }
 }
 
 /**
@@ -456,15 +532,13 @@ export function createRelocationOperation(options: RelocationOptions): LaunchOpe
                     `An interrupted ${record.action} of ${record.original} needs attention (${record.phase}, record ${record.id}). Close the app and preserve the copies listed in ${options.journal.location}. See "Recovering an interrupted relocation" in the README.`
                 )
             }
+            const receipts = await options.journal.owners()
             const catalog: AppInspection[] = []
             for (const app of options.catalog) {
-                const inspection = await inspectApp(app, options.home, { ...options, owner: (original) => options.journal.owner(original) })
-                if ('blocked' in inspection) {
-                    if (!held.has(app.id)) prompts.log(`${app.label} cannot be relocated. ${inspection.blocked}`)
-                    continue
-                }
-                catalog.push(inspection)
+                const inspection = await inspectWithReceipts(app, receipts, prompts, options, held.has(app.id))
+                if (inspection) catalog.push(inspection)
             }
+            await reportUnattributedReceipts(receipts, options.catalog, prompts)
             const inspections: AppInspection[] = []
             for (const [index, claimed] of (await claimRelocationPaths(catalog, options.home, options)).entries()) {
                 const app = catalog[index]!.app

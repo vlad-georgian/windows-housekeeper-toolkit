@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 
-import { isPathInside, listDirectoryNames } from '../../core/filesystem/paths.ts'
+import { listDirectoryNames } from '../../core/filesystem/paths.ts'
 import type { SystemPaths } from '../../core/system-paths.ts'
 import type { RelocatableApp, RelocationPath } from '../types.ts'
 import {
@@ -66,8 +66,10 @@ export function npmLocations(paths: SystemPaths, rawEnv: PackageEnvironment): { 
     if ('blocked' in user) return { prefix: user, cache: user }
     const userSettings: NpmSettings = user
     const scoop = scoopRoots(paths, rawEnv).root
+    // Scoop's Node.js can set the prefix. Without Scoop's root that setting cannot be read.
+    if ('blocked' in scoop) return { prefix: scoop, cache: scoop }
     const nodeRoots = [join(paths.localAppData, 'Programs', 'nodejs'), join(paths.localAppData, 'nodejs')]
-    if ('path' in scoop) for (const name of ['nodejs', 'nodejs-lts']) nodeRoots.push(join(scoop.path, 'apps', name, 'current'))
+    for (const name of ['nodejs', 'nodejs-lts']) nodeRoots.push(join(scoop.path, 'apps', name, 'current'))
     const bundled: { source: string; settings: NpmSettings }[] = []
     for (const root of nodeRoots) {
         const source = join(root, 'node_modules', 'npm', 'npmrc')
@@ -99,11 +101,7 @@ export function npmRelocation(paths: SystemPaths, env: PackageEnvironment): Relo
     const locations = npmLocations(paths, env)
     if ('blocked' in locations.prefix) return { ...app, blocked: locations.prefix.blocked, paths: [] }
     if ('blocked' in locations.cache) return { ...app, blocked: locations.cache.blocked, paths: [] }
-    const scoop = scoopRoots(paths, env).root
-    const persist = 'path' in scoop ? join(scoop.path, 'persist') : null
-    for (const location of [locations.prefix.path, locations.cache.path]) {
-        if (persist && isPathInside(location, persist)) return { ...app, blocked: `${location} is in Scoop's persistent data, which stays in place`, paths: [] }
-    }
+    // A location inside Scoop's root, such as Scoop Node.js's prefix in `persist`, moves with Scoop.
     const prefix = userPath(locations.prefix.path, paths)
     const cache = userPath(locations.cache.path, paths)
     const candidates: RelocationPath[] = []

@@ -21,8 +21,10 @@ import {
     reclaimRelocationLinks,
     removeTree,
     snapshotRelocationLink,
+    externalHardLinksIn,
     snapshotTree,
     type TreeManifest,
+    UnsupportedTreeError,
     verifyTree,
     verifyTreeContents
 } from './tree.ts'
@@ -49,6 +51,11 @@ export interface TransferOptions {
     readonly recordAliases?: (aliases: CopiedFiles) => Promise<void>
     readonly preserveMirror?: boolean
     readonly trackRootAlias?: boolean
+    /**
+     * Refuse when a file in the snapshot has a hard-link name outside the tree. The later
+     * reclamation compares link counts with this same snapshot, so a link added afterwards fails too.
+     */
+    readonly containedHardLinks?: boolean
     /** Removes the staging alias after an exclusive file publication. */
     readonly removeStagingAlias?: (path: string) => Promise<void>
     readonly journal: RecoveryJournal
@@ -278,6 +285,8 @@ async function prepareTransfer(action: 'move' | 'restore', transfer: DirectoryTr
     else if (!(await linksTo(original, destination))) throw new Error(`${original} does not link to ${destination}.`)
 
     const manifest = await snapshotTree(source)
+    const [external] = options.containedHardLinks ? externalHardLinksIn([manifest]) : []
+    if (external) throw new UnsupportedTreeError(`${external.path} is hard-linked to a name outside ${source}. A copy on another drive cannot keep that link.`)
     const output = remapExternalLinks(manifest, options.linkTargets)
     const file = manifest.entries[0]?.kind === 'file'
     if (file !== (transfer.kind === 'file')) throw new Error(`${source} is not the expected type.`)
@@ -509,7 +518,11 @@ async function reclaimRetired(plan: TransferPlan, progress: SwapProgress): Promi
     if ((await objectIdentity(finalRoot)) !== verifiedIdentity) throw new Error(`${finalRoot} changed during reclamation.`)
     await options.journal.setOwner(
         original,
-        moving ? { path: destination, identity: verifiedIdentity } : forwardingIdentity ? { path: destination, identity: forwardingIdentity, forwarding: true } : null
+        moving
+            ? { path: destination, identity: verifiedIdentity, appId: transfer.appId, original }
+            : forwardingIdentity
+              ? { path: destination, identity: forwardingIdentity, forwarding: true, appId: transfer.appId, original }
+              : null
     )
     if ((await objectIdentity(finalRoot)) !== verifiedIdentity) throw new Error(`${finalRoot} changed while recording ownership.`)
     if (!options.copiedFiles) return { files: manifest.files, bytes: manifest.bytes }

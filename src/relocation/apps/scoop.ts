@@ -52,13 +52,14 @@ export function scoopRelocation(paths: SystemPaths, env: PackageEnvironment): Re
         ...app,
         paths: [
             {
-                path: join(root, 'apps'),
-                description: 'installed Scoop apps',
-                // Scoop persists files as hard links between an app version and `persist`. A copy on
-                // another drive cannot keep that link, so those files must not move.
+                path: root,
+                description: 'Scoop installation, apps and persistent data',
+                // Scoop links persisted files between `apps` and `persist` with hard links, now and on
+                // every later install or update. Both trees move as one, so those links stay on one
+                // volume. A hard link that reaches outside the root cannot follow it.
                 hardLinks: 'refuse-external',
                 async verifyDirectory(target) {
-                    const releases = join(target, 'scoop')
+                    const releases = join(target, 'apps', 'scoop')
                     if (!(await directEntry(releases, 'directory'))) return false
                     try {
                         const current = await realpath(join(releases, 'current'))

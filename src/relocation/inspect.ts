@@ -93,13 +93,14 @@ export async function inspectApp(
     for (const entry of app.paths) {
         let state = await inspectPath(entry.path, entry.kind, entry.verifyLegacyTarget)
         let unverifiedOwnership = false
-        if (entry.verifyDirectory) {
+        if (entry.verifyDirectory || entry.recordedOnly) {
             // Optional package paths need positive evidence before they are offered. A link the
             // toolkit recorded stays visible, so its data can always be restored or explained.
             const recorded = state.kind === 'linked' || state.kind === 'unsupported' ? await validation.owner?.(entry.path) : undefined
             if (state.kind === 'unsupported' && !recorded) continue
             if (state.kind === 'linked' && !relocationBaseOf(state.target, home, entry.path)) continue
-            if ((state.kind === 'local' || state.kind === 'linked') && !(await entry.verifyDirectory(state.kind === 'linked' ? state.target : entry.path))) {
+            const owned = async (target: string): Promise<boolean> => !entry.recordedOnly && !!(await entry.verifyDirectory?.(target))
+            if ((state.kind === 'local' || state.kind === 'linked') && !(await owned(state.kind === 'linked' ? state.target : entry.path))) {
                 if (state.kind !== 'linked' || !recordedMirror(recorded, state)) continue
                 unverifiedOwnership = true
             }

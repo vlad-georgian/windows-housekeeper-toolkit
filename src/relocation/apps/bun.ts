@@ -8,9 +8,45 @@ import { agreedPath, directEntry, environmentValue, overlaps, type PackageEnviro
 type BunSetting = 'install.globalDir' | 'install.globalBinDir' | 'install.cache.dir'
 const settings: readonly BunSetting[] = ['install.globalDir', 'install.globalBinDir', 'install.cache.dir']
 
+const escapes: Readonly<Record<string, string>> = { b: '\b', t: '\t', n: '\n', f: '\f', r: '\r', e: '\u001b', '"': '"', '\\': '\\' }
+
+/** Decodes a TOML basic string body, or returns `null` for an escape TOML does not define. */
+function basicString(body: string): string | null {
+    let invalid = false
+    const decoded = body.replace(/\\(u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|.)/gu, (_match, escape: string) => {
+        if (escape.length > 1) {
+            const code = Number.parseInt(escape.slice(1), 16)
+            if (code <= 0x10ffff && (code < 0xd800 || code > 0xdfff)) return String.fromCodePoint(code)
+        } else if (escapes[escape] !== undefined) return escapes[escape]
+        invalid = true
+        return ''
+    })
+    return invalid ? null : decoded
+}
+
+const keyPart = String.raw`(?:[\w-]+|"[^"]*"|'[^']*')`
+const dottedKey = String.raw`${keyPart}(?:\s*\.\s*${keyPart})*`
+const keyValue = new RegExp(String.raw`^(${dottedKey})\s*=\s*(.*)$`, 'u')
+// `[table]` and `[[array of tables]]` both start a new section.
+const tableHeader = new RegExp(String.raw`^\[\[?\s*(${dottedKey})\s*\]\]?\s*(?:#.*)?$`, 'u')
+
+/** A dotted TOML key without quotes or the whitespace TOML allows around its dots. */
+function normalizedKey(key: string): string {
+    return [...key.matchAll(new RegExp(keyPart, 'gu'))]
+        .map(
+            ([part]) =>
+                /^(?:"(.*)"|'(.*)')$/u
+                    .exec(part)
+                    ?.slice(1)
+                    .find((value) => value !== undefined) ?? part
+        )
+        .join('.')
+}
+
 /**
- * The install locations in one global `bunfig.toml`. Only plain string values are understood.
- * Any other form of a location setting, such as an inline table, returns a reason instead.
+ * The install locations in one global `bunfig.toml`. Only single-line string values are
+ * understood. Anything else in an `install` table, or any other form of a location setting,
+ * returns a reason instead, so the active location is never guessed.
  */
 function readBunfig(path: string): Partial<Record<BunSetting, string>> | { blocked: string } {
     const file = readConfigFile(path)
@@ -18,25 +54,30 @@ function readBunfig(path: string): Partial<Record<BunSetting, string>> | { block
     if ('blocked' in file) return file
     const found: Partial<Record<BunSetting, string>> = {}
     let section = ''
-    for (const raw of file.text.split(/\r?\n/u)) {
+    for (const raw of file.text.replace(/^﻿/u, '').split(/\r?\n/u)) {
         const line = raw.trim()
         if (!line || line.startsWith('#')) continue
-        const header = /^\[([^[\]]+)\]\s*(?:#.*)?$/u.exec(line)
+        const header = tableHeader.exec(line)
         if (header?.[1]) {
-            section = header[1].replaceAll(/\s|"/gu, '')
+            section = normalizedKey(header[1])
             continue
         }
-        const pair = /^([\w."-]+)\s*=\s*(.*)$/u.exec(line)
-        if (!pair?.[1] || pair[2] === undefined) continue
-        const key = [section, pair[1].replaceAll('"', '')].filter(Boolean).join('.')
+        const pair = keyValue.exec(line)
+        if (!pair?.[1] || pair[2] === undefined) {
+            if (section === 'install' || section.startsWith('install.') || /\binstall\b/u.test(line)) {
+                return { blocked: `${path} has a line the relocation catalog does not read: ${line}` }
+            }
+            continue
+        }
+        const key = [section, normalizedKey(pair[1])].filter(Boolean).join('.')
         const setting = settings.find((name) => name === key || name.startsWith(`${key}.`))
         if (!setting) continue
+        const unreadable = { blocked: `${path} sets ${key} in a form the relocation catalog does not read` }
         const basic = /^"((?:[^"\\]|\\.)*)"\s*(?:#.*)?$/u.exec(pair[2])
         const literal = /^'([^']*)'\s*(?:#.*)?$/u.exec(pair[2])
-        const unreadable = { blocked: `${path} sets ${key} in a form the relocation catalog does not read` }
         if (setting !== key || (!basic && !literal)) return unreadable
-        const decoded: unknown = basic?.[1] === undefined ? literal?.[1] : JSON.parse(`"${basic[1]}"`)
-        if (typeof decoded !== 'string') return unreadable
+        const decoded = basic?.[1] === undefined ? (literal?.[1] ?? null) : basicString(basic[1])
+        if (decoded === null) return unreadable
         found[setting] = decoded
     }
     return found

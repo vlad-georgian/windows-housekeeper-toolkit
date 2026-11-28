@@ -9,6 +9,11 @@ export interface RelocationPath {
     readonly verifyFile?: (target: string) => Promise<boolean>
     /** Require ownership evidence for an optional package-manager path. */
     readonly verifyDirectory?: (target: string) => Promise<boolean>
+    /**
+     * A path known only from the toolkit's receipt, such as an npm prefix that has since changed.
+     * It is offered for restore while it still links to its recorded mirror, and never moved.
+     */
+    readonly recordedOnly?: true
     readonly kind?: 'directory' | 'file'
     /**
      * Files whose hard-link names reach outside the moved paths lose that link on another drive.

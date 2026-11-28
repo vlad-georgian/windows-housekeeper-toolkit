@@ -13,7 +13,7 @@ import type { PackageEnvironment } from './apps/package-evidence.ts'
 import { createRecoveryJournal } from './journal.ts'
 import { differentVolumes } from './layout.ts'
 import { createRelocationOperation, type RelocationEvent, toolkitProcessIds } from './operation.ts'
-import { DestinationConflictError, moveDirectory } from './transfer.ts'
+import { DestinationConflictError, moveDirectory, UnsupportedTreeError } from './transfer.ts'
 import type { RelocatableApp } from './types.ts'
 
 // Each full move or restore reads Windows permissions through PowerShell several times.
@@ -71,7 +71,8 @@ async function scoopLayout() {
     const foo = await sandbox.directory('Users/test/scoop/apps/foo/1')
     await symlink(foo, join(foo, '..', 'current'), 'junction')
     await symlink(persist, join(foo, 'data'), 'junction')
-    return { apps: join(sandbox.paths.home, 'scoop', 'apps'), launcher, persist, foo }
+    const root = join(sandbox.paths.home, 'scoop')
+    return { root, apps: join(root, 'apps'), launcher, persist, foo }
 }
 
 /** npm with one global package and a content cache under the default per-user locations. */
@@ -85,15 +86,18 @@ async function npmLayout() {
     }
 }
 
+async function inode(path: string): Promise<bigint> {
+    return (await lstat(path, { bigint: true })).ino
+}
+
 test(
-    'Scoop moves and restores once while two apps retain one persistent directory',
+    'Scoop moves its whole root once, and apps keep one persistent directory and new persisted hard links',
     async () => {
         const manager = await sandbox.directory('Users/test/scoop/apps/scoop/1')
         await sandbox.file('Users/test/scoop/apps/scoop/1/bin/scoop.ps1', '# Scoop fixture')
         await symlink(manager, join(manager, '..', 'current'), 'junction')
         const shared = await sandbox.directory('Users/test/scoop/persist/shared')
         const configuration = await sandbox.file('Users/test/scoop/persist/shared/settings.txt', 'original')
-        const persistentIdentity = (await lstat(shared, { bigint: true })).ino
         const node = await sandbox.directory('Users/test/scoop/apps/nodejs/26')
         await sandbox.file('Users/test/scoop/apps/nodejs/26/node.exe', 'fixture executable')
         await sandbox.file('Users/test/scoop/apps/nodejs/26/node_modules/tool/package.json', '{"name":"tool","version":"1.0.0"}')
@@ -105,7 +109,8 @@ test(
 
         disposableDestination = otherVolume ? await mkdtemp(join(otherVolume, 'housekeeper-test-')) : undefined
         const base = join(disposableDestination ?? sandbox.root, 'Software')
-        const apps = join(sandbox.paths.home, 'scoop', 'apps')
+        const root = join(sandbox.paths.home, 'scoop')
+        const apps = join(root, 'apps')
         const { operation, events } = relocation({
             env: { NPM_CONFIG_PREFIX: node },
             crossVolume: !!otherVolume,
@@ -114,14 +119,24 @@ test(
         const select = new FakePrompts([['scoop', 'npm', 'nodejs', 'duplicate'], base])
         const move = planned(await operation.gather(select))
         expect(select.checklists[0]?.options.map(({ value }) => value)).toEqual(['scoop'])
-        expect(move.lines.filter((line) => line.includes('→'))).toHaveLength(1)
+        expect(move.lines.filter((line) => line.includes('→'))).toEqual([expect.stringContaining(`  ${root} → ${join(base, 'test', 'scoop')}`)])
         await move.apply()
         expect(events.filter((event) => event.kind === 'failed')).toEqual([])
+        expect(await realpath(root)).toBe(join(base, 'test', 'scoop'))
         expect(await realpath(apps)).toBe(join(base, 'test', 'scoop', 'apps'))
         expect(await readFile(join(node, 'node.exe'), 'utf8')).toBe('fixture executable')
         expect(await readFile(launcher, 'utf8')).toContain(join(node, 'node.exe'))
         await writeFile(join(node, 'data', 'settings.txt'), 'latest')
         expect(await readFile(join(second, 'data', 'settings.txt'), 'utf8')).toBe('latest')
+        expect(await readFile(join(outsideConsumer, 'settings.txt'), 'utf8')).toBe('latest')
+
+        // A later `scoop install` hard-links a persisted file from the version into `persist`.
+        // Both names resolve to the base drive, so the link works across the original volume.
+        const persisted = join(shared, 'app.ini')
+        await writeFile(persisted, 'defaults')
+        await link(persisted, join(node, 'app.ini'))
+        await writeFile(join(node, 'app.ini'), 'user setting')
+        expect(await readFile(persisted, 'utf8')).toBe('user setting')
 
         const clear = new FakePrompts([[]])
         const restore = planned(await operation.gather(clear))
@@ -129,71 +144,111 @@ test(
         expect(restore.lines.filter((line) => line.includes('→'))).toHaveLength(1)
         await restore.apply()
         expect(events.filter((event) => event.kind === 'failed')).toEqual([])
-        expect((await lstat(apps)).isSymbolicLink()).toBe(false)
-        expect((await lstat(shared, { bigint: true })).ino).toBe(persistentIdentity)
-        expect(await realpath(join(node, 'data'))).toBe(await realpath(join(second, 'data')))
+        expect((await lstat(root)).isSymbolicLink()).toBe(false)
+        expect(await realpath(join(node, 'data'))).toBe(shared)
+        expect(await realpath(join(second, 'data'))).toBe(shared)
         expect(await readFile(join(outsideConsumer, 'settings.txt'), 'utf8')).toBe('latest')
         expect(await readFile(configuration, 'utf8')).toBe('latest')
+        expect(await inode(join(node, 'app.ini'))).toBe(await inode(persisted))
+        expect((await lstat(persisted)).nlink).toBe(2)
     },
     transferTimeout
 )
 
-test('Scoop refuses to move apps whose persisted files are hard links into persist', async () => {
-    const { apps, foo } = await scoopLayout()
-    const persisted = await sandbox.file('Users/test/scoop/persist/foo/config.ini', 'original')
-    await link(persisted, join(foo, 'config.ini'))
+test(
+    'Scoop keeps a persisted file linked between apps and persist through move and restore',
+    async () => {
+        const { root, foo } = await scoopLayout()
+        const persisted = await sandbox.file('Users/test/scoop/persist/foo/config.ini', 'original')
+        await link(persisted, join(foo, 'config.ini'))
+        const { operation, events } = relocation()
+
+        await planned(await operation.gather(new FakePrompts([['scoop'], join(sandbox.root, 'Software')]))).apply()
+        expect((await lstat(root)).isSymbolicLink()).toBe(true)
+        expect(await inode(join(foo, 'config.ini'))).toBe(await inode(persisted))
+        await writeFile(join(foo, 'config.ini'), 'moved edit')
+        expect(await readFile(persisted, 'utf8')).toBe('moved edit')
+
+        await planned(await operation.gather(new FakePrompts([[]]))).apply()
+        expect(events.filter((event) => event.kind === 'failed')).toEqual([])
+        expect((await lstat(root)).isSymbolicLink()).toBe(false)
+        expect(await inode(join(foo, 'config.ini'))).toBe(await inode(persisted))
+        expect((await lstat(persisted)).nlink).toBe(2)
+    },
+    transferTimeout
+)
+
+test('Scoop refuses to move a file hard-linked to a name outside its root', async () => {
+    const { root, foo } = await scoopLayout()
+    const outside = await sandbox.file('Users/test/Documents/config.ini', 'original')
+    await link(outside, join(foo, 'config.ini'))
     const { operation } = relocation()
     const prompts = new FakePrompts([['scoop'], join(sandbox.root, 'Software')])
 
     expect(await operation.gather(prompts)).toBeNull()
-    expect(prompts.logs.some((message) => message.includes(`${join(foo, 'config.ini')} is hard-linked to a name outside ${apps}`))).toBe(true)
-    expect((await lstat(apps)).isSymbolicLink()).toBe(false)
-    expect((await lstat(persisted)).nlink).toBe(2)
+    expect(prompts.logs.some((message) => message.includes(`${join(foo, 'config.ini')} is hard-linked to a name outside ${root}`))).toBe(true)
+    expect((await lstat(root)).isSymbolicLink()).toBe(false)
+    expect((await lstat(outside)).nlink).toBe(2)
 })
 
-test('Scoop leaves everything in place when a persisted hard link appears before apply', async () => {
-    const { apps, foo } = await scoopLayout()
+test('Scoop leaves everything in place when an outside hard link appears before apply', async () => {
+    const { root, foo } = await scoopLayout()
     const { operation, events } = relocation()
     const move = planned(await operation.gather(new FakePrompts([['scoop'], join(sandbox.root, 'Software')])))
-    const persisted = await sandbox.file('Users/test/scoop/persist/foo/config.ini', 'original')
-    await link(persisted, join(foo, 'config.ini'))
+    const outside = await sandbox.file('Users/test/Documents/config.ini', 'original')
+    await link(outside, join(foo, 'config.ini'))
 
     await move.apply()
 
-    expect(events).toMatchObject([{ kind: 'failed', appId: 'scoop', completed: [], notAttempted: [apps] }])
-    expect((await lstat(apps)).isSymbolicLink()).toBe(false)
+    expect(events).toMatchObject([{ kind: 'failed', appId: 'scoop', completed: [], notAttempted: [root] }])
+    expect((await lstat(root)).isSymbolicLink()).toBe(false)
     await writeFile(join(foo, 'config.ini'), 'edited')
-    expect(await readFile(persisted, 'utf8')).toBe('edited')
+    expect(await readFile(outside, 'utf8')).toBe('edited')
 })
 
-test('Scoop leaves its apps in place when the launcher disappears before apply', async () => {
-    const { apps, launcher } = await scoopLayout()
+test('the transfer refuses an outside hard link in the same snapshot it verifies', async () => {
+    const { root, foo } = await scoopLayout()
+    const outside = await sandbox.file('Users/test/Documents/config.ini', 'original')
+    await link(outside, join(foo, 'config.ini'))
+    const journal = createRecoveryJournal(sandbox.paths)
+    const base = join(sandbox.root, 'Software')
+
+    const error = await rejection(moveDirectory({ appId: 'scoop', original: root, destination: join(base, 'test', 'scoop'), base }, { journal, containedHardLinks: true }))
+
+    expect(error).toBeInstanceOf(UnsupportedTreeError)
+    expect((await lstat(root)).isSymbolicLink()).toBe(false)
+    expect((await lstat(outside)).nlink).toBe(2)
+    expect(await journal.list()).toEqual([])
+})
+
+test('Scoop stays in place when its launcher disappears before apply', async () => {
+    const { root, launcher } = await scoopLayout()
     const { operation, events } = relocation()
     const move = planned(await operation.gather(new FakePrompts([['scoop'], join(sandbox.root, 'Software')])))
     await unlink(launcher)
 
     await move.apply()
 
-    expect(events).toMatchObject([{ kind: 'failed', appId: 'scoop', action: 'move', original: apps, completed: [] }])
-    expect((await lstat(apps)).isSymbolicLink()).toBe(false)
-    expect(await realpath(apps)).toBe(apps)
+    expect(events).toMatchObject([{ kind: 'failed', appId: 'scoop', action: 'move', original: root, completed: [] }])
+    expect((await lstat(root)).isSymbolicLink()).toBe(false)
+    expect(await realpath(root)).toBe(root)
 })
 
 test('an interrupted Scoop swap puts back the exact release and persist junctions', async () => {
-    const { apps, persist, foo } = await scoopLayout()
-    const identities = async () =>
-        Promise.all([apps, join(apps, 'scoop', 'current'), join(foo, '..', 'current'), join(foo, 'data'), persist].map(async (path) => (await lstat(path, { bigint: true })).ino))
+    const { root, apps, persist, foo } = await scoopLayout()
+    const identities = async () => Promise.all([root, join(apps, 'scoop', 'current'), join(foo, '..', 'current'), join(foo, 'data'), persist].map(inode))
     const before = await identities()
-    const destination = join(sandbox.root, 'Software', 'test', 'scoop', 'apps')
+    const base = join(sandbox.root, 'Software')
     const journal = createRecoveryJournal(sandbox.paths)
 
     const error = await rejection(
         moveDirectory(
-            { appId: 'scoop', original: apps, destination, base: join(sandbox.root, 'Software') },
+            { appId: 'scoop', original: root, destination: join(base, 'test', 'scoop'), base },
             {
                 journal,
+                containedHardLinks: true,
                 async beforePhase(phase) {
-                    if (phase === 'swapping') await sandbox.file('Software/test/scoop/apps/racing-writer.txt', 'occupied')
+                    if (phase === 'swapping') await sandbox.file('Software/test/scoop/racing-writer.txt', 'occupied')
                 }
             }
         )
@@ -239,6 +294,52 @@ test('an unrecorded link with missing npm data is not offered as relocated', asy
     expect(await relocation().operation.gather(prompts)).toBeNull()
     expect(prompts.checklists).toHaveLength(0)
 })
+
+test(
+    'npm restores the path it relocated after its configured prefix changes',
+    async () => {
+        const { globals, cache } = await npmLayout()
+        const base = join(sandbox.root, 'Software')
+        await planned(await relocation().operation.gather(new FakePrompts([['npm'], base]))).apply()
+        await sandbox.file('Users/test/.npmrc', `prefix=${join(sandbox.paths.home, 'npm-global')}\n`)
+
+        const { operation, events } = relocation()
+        const clear = new FakePrompts([[]])
+        const restore = planned(await operation.gather(clear))
+        expect(clear.checklists[0]?.options.find(({ value }) => value === 'npm')?.hint).toContain(`${globals} no longer shows npm data`)
+        expect(restore.lines.filter((line) => line.includes('→'))).toHaveLength(2)
+        await restore.apply()
+
+        expect(events.filter((event) => event.kind === 'failed')).toEqual([])
+        expect(events.filter((event) => event.kind === 'restored').map((event) => event.kind === 'restored' && event.original)).toEqual([cache, globals])
+        for (const path of [globals, cache]) expect(await realpath(path)).toBe(path)
+    },
+    transferTimeout
+)
+
+test(
+    'npm stays restorable while its configuration blocks a new move',
+    async () => {
+        const { globals, cache } = await npmLayout()
+        const base = join(sandbox.root, 'Software')
+        await planned(await relocation().operation.gather(new FakePrompts([['npm'], base]))).apply()
+        await sandbox.file('Users/test/.npmrc', 'prefix=${UNDEFINED_PREFIX}\\npm\n')
+
+        const { operation, events } = relocation()
+        const reselect = new FakePrompts([['npm'], base])
+        expect(await operation.gather(reselect)).toBeNull()
+        expect(reselect.logs).toContain(`npm cannot be relocated. ${join(sandbox.paths.home, '.npmrc')} refers to an undefined variable in prefix`)
+        expect(reselect.logs).toContain("npm's relocated paths can still be restored. Leave it clear to restore them.")
+
+        const restore = planned(await operation.gather(new FakePrompts([[]])))
+        expect(restore.lines.filter((line) => line.includes('→'))).toHaveLength(2)
+        await restore.apply()
+        expect(events.filter((event) => event.kind === 'failed')).toEqual([])
+        for (const path of [globals, cache]) expect(await realpath(path)).toBe(path)
+        expect(await createRecoveryJournal(sandbox.paths).owners()).toEqual(new Map())
+    },
+    transferTimeout
+)
 
 test(
     'Bun moves its global packages and cache together and keeps their shared hard links',
@@ -301,9 +402,9 @@ test(
         const base = join(sandbox.root, 'Software')
         // The toolkit runs as `vp run start` → `bun`. Its own launcher chain does not hold back Bun or Vite+.
         const processes: WindowsProcess[] = [
-            { id: process.pid, name: 'bun.exe', path: null, commandLine: '"C:\\Tools\\bun.exe" run src/index.ts', parentId: 1101 },
-            { id: 1101, name: 'vp.exe', path: null, commandLine: '"C:\\Tools\\vp.exe" run start', parentId: 1100 },
-            { id: 1100, name: 'pwsh.exe', path: null, commandLine: 'pwsh', parentId: null }
+            { id: process.pid, name: 'bun.exe', path: null, commandLine: '"C:\\Tools\\bun.exe" run src/index.ts', parentId: 1101, createdAt: '2026-11-28T10:00:02Z' },
+            { id: 1101, name: 'vp.exe', path: null, commandLine: '"C:\\Tools\\vp.exe" run start', parentId: 1100, createdAt: '2026-11-28T10:00:01Z' },
+            { id: 1100, name: 'pwsh.exe', path: null, commandLine: 'pwsh', parentId: null, createdAt: '2026-11-28T10:00:00Z' }
         ]
         const operation = (env: PackageEnvironment, machineChocolatey?: string) => relocation({ env, machineChocolatey, processes })
 
@@ -338,16 +439,37 @@ test(
     transferTimeout
 )
 
+/** A process start time in seconds after a fixed minute. */
+function at(second: number): string {
+    return `2026-11-28T10:00:${String(second).padStart(2, '0')}Z`
+}
+
 test('only the toolkit and its launcher wrappers are exempt from the package guards', () => {
     const chain: WindowsProcess[] = [
-        { id: 30, name: 'bun.exe', parentId: 20 },
-        { id: 20, name: 'vp.exe', parentId: 10 },
-        { id: 10, name: 'claude.exe', parentId: 5 },
-        { id: 5, name: 'bun.exe', parentId: null },
-        { id: 40, name: 'bun.exe', commandLine: 'bun.exe run src/index.ts', parentId: 10 }
+        { id: 30, name: 'bun.exe', parentId: 20, createdAt: at(4) },
+        { id: 20, name: 'vp.exe', parentId: 10, createdAt: at(3) },
+        { id: 10, name: 'claude.exe', parentId: 5, createdAt: at(2) },
+        { id: 5, name: 'bun.exe', parentId: null, createdAt: at(1) },
+        { id: 40, name: 'bun.exe', commandLine: 'bun.exe run src/index.ts', parentId: 10, createdAt: at(5) }
     ]
     expect([...toolkitProcessIds(chain, 30)].toSorted((a, b) => a - b)).toEqual([20, 30])
     expect([...toolkitProcessIds([{ id: 30, name: 'bun.exe' }], 30)]).toEqual([30])
+    // The launcher exited and an unrelated `bun install` received its ID after the toolkit started.
+    const reused: WindowsProcess[] = [
+        { id: 30, name: 'bun.exe', parentId: 20, createdAt: at(4) },
+        { id: 20, name: 'bun.exe', commandLine: 'bun install', parentId: 10, createdAt: at(9) }
+    ]
+    expect([...toolkitProcessIds(reused, 30)]).toEqual([30])
+    // Without start times the chain is not trusted.
+    expect([
+        ...toolkitProcessIds(
+            [
+                { id: 30, name: 'bun.exe', parentId: 20 },
+                { id: 20, name: 'vp.exe', parentId: 10 }
+            ],
+            30
+        )
+    ]).toEqual([30])
 })
 
 test('another project with the toolkit command line still holds back Bun', async () => {
@@ -397,7 +519,7 @@ test('package locations come from the managers’ own configuration', async () =
     const move = planned(await relocation().operation.gather(prompts))
 
     expect(move.lines).toContain(`Move Scoop to another drive`)
-    expect(move.lines.some((line) => line.startsWith(`  ${join(sandbox.paths.home, 'tools', 'scoop', 'apps')} →`))).toBe(true)
+    expect(move.lines.some((line) => line.startsWith(`  ${join(sandbox.paths.home, 'tools', 'scoop')} →`))).toBe(true)
     expect(move.lines.some((line) => line.startsWith(`  ${join(sandbox.paths.roamingAppData, 'custom-npm', 'node_modules')} →`))).toBe(true)
     expect(move.lines.some((line) => line.includes(join(sandbox.paths.roamingAppData, 'npm', 'node_modules')))).toBe(false)
 })
@@ -409,19 +531,56 @@ test('ambiguous package locations are refused with a reason', async () => {
     await sandbox.directory('Users/test/.bun/install/global/node_modules')
     await sandbox.file('Users/test/AppData/Local/Programs/nodejs/node_modules/npm/npmrc', 'prefix=${APPDATA}\\npm\n')
     await sandbox.file('Users/test/scoop/apps/nodejs/current/node_modules/npm/npmrc', `prefix=${join(sandbox.paths.home, 'scoop', 'persist', 'nodejs', 'bin')}\n`)
-    await sandbox.file('Users/test/.bunfig.toml', '[install]\nglobalDir = "C:\\\\Elsewhere\\\\global"\n')
+    const bunfig = join(sandbox.paths.home, '.bunfig.toml')
+    await writeFile(bunfig, '[install]\nglobalDir = "C:\\\\Elsewhere\\\\global"\n')
     const prompts = new FakePrompts([[]])
 
     expect(await relocation({ env: { BUN_INSTALL_GLOBAL_DIR: join(sandbox.paths.home, '.bun', 'install', 'global') } }).operation.gather(prompts)).toBeNull()
     expect(prompts.logs.some((message) => message.startsWith('npm cannot be relocated. npm prefix is set to'))).toBe(true)
     expect(prompts.logs.some((message) => message.startsWith('Bun cannot be relocated. The Bun global directory is set to'))).toBe(true)
 
-    await sandbox.file('Users/test/.bunfig.toml', '[install]\ncache = { dir = "C:\\\\Elsewhere\\\\cache" }\n')
-    await rm(join(sandbox.paths.localAppData, 'Programs'), { recursive: true })
-    const inline = new FakePrompts([[]])
-    expect(await relocation().operation.gather(inline)).toBeNull()
-    expect(inline.logs).toContain(`Bun cannot be relocated. ${join(sandbox.paths.home, '.bunfig.toml')} sets install.cache in a form the relocation catalog does not read`)
-    expect(inline.logs).toContain(`npm cannot be relocated. ${join(sandbox.paths.home, 'scoop', 'persist', 'nodejs', 'bin')} is in Scoop's persistent data, which stays in place`)
+    const refusals: [string, string][] = [
+        ['[install]\ncache = { dir = "C:\\\\Elsewhere\\\\cache" }\n', `${bunfig} sets install.cache in a form the relocation catalog does not read`],
+        // Single backslashes are invalid TOML escapes. Bun is refused, and the catalog still builds.
+        ['[install]\nglobalDir = "C:\\Users\\test\\bun-global"\n', `${bunfig} sets install.globalDir in a form the relocation catalog does not read`],
+        ['[install]\nregistry = [\n  "https://example.invalid",\n]\n', `${bunfig} has a line the relocation catalog does not read: "https://example.invalid",`]
+    ]
+    for (const [text, reason] of refusals) {
+        await writeFile(bunfig, text)
+        const refused = new FakePrompts([[]])
+        expect(await relocation().operation.gather(refused)).toBeNull()
+        expect(refused.logs).toContain(`Bun cannot be relocated. ${reason}`)
+    }
+})
+
+test('valid bunfig forms are read, so a stale default cache is not offered', async () => {
+    await sandbox.file('Users/test/.bun/install/cache/tool@1.2.3@@@1/package.json', '{"name":"tool","version":"1.2.3"}')
+    const bunfig = join(sandbox.paths.home, '.bunfig.toml')
+    for (const text of [
+        `[install]\ncache . dir = "${join(sandbox.root, 'bun-cache').replaceAll('\\', '\\\\')}"\n`,
+        `[[install.scopes]]\nname = "x"\n[install . cache]\ndir = '${join(sandbox.root, 'bun-cache')}'\n`
+    ]) {
+        await writeFile(bunfig, text)
+        const prompts = new FakePrompts([[]])
+        expect(await relocation().operation.gather(prompts)).toBeNull()
+        expect(prompts.logs.some((message) => message.startsWith('Bun cannot'))).toBe(false)
+        expect(prompts.checklists).toHaveLength(0)
+    }
+    await rm(bunfig)
+    const fallback = new FakePrompts([[]])
+    expect(await relocation().operation.gather(fallback)).toBeNull()
+    expect(fallback.checklists[0]?.options.map(({ value }) => value)).toEqual(['bun'])
+})
+
+test('an unreadable Scoop configuration refuses Scoop and npm with the same reason', async () => {
+    await scoopLayout()
+    await npmLayout()
+    const config = await sandbox.file('Users/test/.config/scoop/config.json', '{ "root_path": ')
+    const prompts = new FakePrompts([[]])
+
+    expect(await relocation().operation.gather(prompts)).toBeNull()
+    expect(prompts.logs).toContain(`Scoop cannot be relocated. Could not parse the Scoop configuration at ${config}`)
+    expect(prompts.logs).toContain(`npm cannot be relocated. Could not parse the Scoop configuration at ${config}`)
 })
 
 test('distinct catalog names sharing one physical backing directory cannot restore it twice', async () => {

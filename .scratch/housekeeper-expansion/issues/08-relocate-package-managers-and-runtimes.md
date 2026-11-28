@@ -19,10 +19,14 @@ Offer reversible relocation of verified per-user Node.js, Vite+, Bun, npm, Scoop
 ## Answer
 
 The [relocation architecture](../../../docs/architecture/relocation.md#package-manager-ownership)
-records the evidence required for each package path. The Windows Scoop
-fixture uses two version directories that link to one persistent directory,
-selects overlapping catalog entries, and verifies one transfer each way.
-It checks that the persistent directory retains its identity and every
-consumer can read the latest data. The other fixtures cover an independent
+records the evidence required for each package path. Scoop moves its
+whole root, so its apps and persistent data share a volume and its persisted
+hard links keep working, including ones Scoop creates after the move. The
+Windows Scoop fixture uses two version directories that link to one
+persistent directory, selects overlapping catalog entries, and verifies one
+transfer each way across fixed volumes. Every consumer, including a junction
+from outside the root, reads the latest data, and a persisted file hard-linked
+after the move keeps both names. The other fixtures cover an independent
 Node.js move, Vite+-managed Node.js, npm and Bun global packages, per-user
-Chocolatey, and a conflict between distinct names for the same backing tree.
+Chocolatey, restore from the toolkit's receipts after configuration changes,
+and a conflict between distinct names for the same backing tree.
