@@ -18,6 +18,11 @@ export interface CleanupCandidate {
     readonly canonicalPath?: string
     readonly filesystemIdentity?: FilesystemIdentity
     readonly filesystemAliases?: readonly string[]
+    /**
+     * Links and hardlinked files inside the candidate tree are measured and unlinked in place,
+     * never followed. Only the candidate itself must be an unlinked entry.
+     */
+    readonly unlinkTreeLinks?: boolean
     readonly publishedName?: string
     readonly driverVersion?: string
 }

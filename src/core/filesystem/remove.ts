@@ -3,6 +3,7 @@ import { chmod, readdir, rmdir, unlink } from 'node:fs/promises'
 import { resolve } from 'node:path'
 
 import type { CleanupCandidate, RemovalCallbacks, RemovalResult } from '../types.ts'
+import { removeTreeAnchored } from './anchored-delete.ts'
 import { measurePath } from './detect.ts'
 import { canonicalPathKey, entryIdentity, hasErrorCode, hasIdentity, inspectCanonicalEntry, resolveTarget, resolveTargetGroup, UnverifiedPathError } from './paths.ts'
 
@@ -87,12 +88,17 @@ export async function removeFilesystemCandidate(candidate: CleanupCandidate, cal
     }
 
     // Verify the entire tree before starting so a new linked or inaccessible child prevents removal.
-    await measurePath(target.path, target.stats)
+    await measurePath(target.path, target.stats, candidate.unlinkTreeLinks)
     const current = await resolveTarget(candidate.path, candidate.allowedRoot)
     if (canonicalPathKey(current.path) !== canonicalPathKey(target.path) || !hasIdentity(current, target.identity)) {
         throw new UnverifiedPathError(`${target.path} changed before removal.`)
     }
 
+    if (candidate.unlinkTreeLinks) {
+        // Path-based deletion cannot keep a parent swap from redirecting an unlink, so only handle-anchored removal is allowed.
+        const anchored = await removeTreeAnchored(current.path, current.path, { dev: current.stats.dev, ino: current.stats.ino }, callbacks)
+        return { removedEntries: anchored.entries, reclaimedBytes: anchored.bytes }
+    }
     const result = await removePathRecursively(current.path, current.stats, callbacks)
     return { removedEntries: result.entries, reclaimedBytes: result.bytes }
 }

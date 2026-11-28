@@ -7,15 +7,15 @@ candidate's location and identity before removing it. Windows feature modules
 use PowerShell, Windows tools, or the installed app to query and verify system
 state.
 
-| Path                                           | Role                                                                                                                     |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| [`src/index.ts`](../../src/index.ts)           | Windows platform check, command dispatch, locking for Windows control commands, and top-level error reporting.           |
-| [`src/launch/`](cleanup.md)                    | Launch menu, operation registry, combined plan, and prompt adapter.                                                      |
-| [`src/cleanup/`](cleanup.md)                   | Cleanup categories and operations, unattended and sign-in cleanup, from detection through the audit summary.             |
-| [`src/cleaners/`](cleaners.md)                 | App-specific rules for recognizing and removing redundant payloads.                                                      |
-| [`src/core/`](core.md)                         | Shared types, filesystem verification, state, command execution, and formatting.                                         |
-| [`src/windows/`](windows.md)                   | Startup, updates, scheduled tasks, notifications, process inspection, and migration.                                     |
-| [`src/test-support/`](../../src/test-support/) | Disposable sandbox profiles, Codex release fixtures, and scripted prompts for tests. Tests never touch the real profile. |
+| Path                                           | Role                                                                                                                                         |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`src/index.ts`](../../src/index.ts)           | Windows platform check, command dispatch, locking for Windows control commands, and top-level error reporting.                               |
+| [`src/launch/`](cleanup.md)                    | Launch menu, operation registry, combined plan, and prompt adapter.                                                                          |
+| [`src/cleanup/`](cleanup.md)                   | Cleanup categories and operations, unattended and sign-in cleanup, from detection through the audit summary.                                 |
+| [`src/cleaners/`](cleaners.md)                 | App-specific rules for recognizing and removing redundant payloads.                                                                          |
+| [`src/core/`](core.md)                         | Shared types, filesystem verification, state, command execution, and formatting.                                                             |
+| [`src/windows/`](windows.md)                   | Startup, updates, scheduled tasks, notifications, process inspection, and migration.                                                         |
+| [`src/test-support/`](../../src/test-support/) | Disposable sandbox profiles, Codex release fixtures, scripted prompts, and a rejection helper for tests. Tests never touch the real profile. |
 
 The launch menu (`src/launch/`) starts with every operation unchecked. Each
 selected operation gathers its own choices, then one combined plan is

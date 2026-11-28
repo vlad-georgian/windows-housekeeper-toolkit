@@ -3,19 +3,22 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { createCleaners } from '../cleaners/index.ts'
+import { ClaudeCodeInstallationCleaner } from '../cleaners/installations/claude-code-cleaner.ts'
 import { CodexInstallationCleaner } from '../cleaners/installations/codex-cleaner.ts'
+import { VitePlusInstallationCleaner } from '../cleaners/installations/vite-plus-cleaner.ts'
 import { AuditLogger } from '../core/audit-logger.ts'
 import { pathExists } from '../core/filesystem/index.ts'
-import type { CleanupCategoryId } from '../core/types.ts'
+import type { AppCleaner, CleanupCategoryId } from '../core/types.ts'
 import { addCodexRelease, codexStorePath, selectCodexRelease } from '../test-support/codex-fixtures.ts'
 import { createSandbox, type Sandbox } from '../test-support/fixtures.ts'
+import { addVitePlusRelease, selectVitePlusRelease, vitePlusSplitData } from '../test-support/vite-plus-fixtures.ts'
 import type { WindowsProcess } from '../windows/processes.ts'
 import { cleanersForCategories } from './categories.ts'
 import { type CleanupSession, runUnattendedCleanup } from './operations.ts'
 import { newSummary } from './summary.ts'
 
 // Overrides that would point cleaners at real locations instead of the sandbox.
-const overrides = ['CODEX_HOME', 'SCOOP', 'SCOOP_CACHE', 'BUN_INSTALL', 'BUN_INSTALL_CACHE_DIR', 'ChocolateyInstall']
+const overrides = ['CODEX_HOME', 'SCOOP', 'SCOOP_CACHE', 'BUN_INSTALL', 'BUN_INSTALL_CACHE_DIR', 'ChocolateyInstall', 'VP_HOME', 'VP_BIN_DIR', 'VP_DATA_DIR', 'VP_CACHE_DIR']
 const saved = new Map(overrides.map((name) => [name, process.env[name]]))
 beforeAll(() => {
     for (const name of overrides) delete process.env[name]
@@ -39,6 +42,18 @@ beforeEach(async () => {
 })
 afterEach(() => sandbox.dispose())
 
+/** Replaces cleaners that query live processes or the native launcher with scripted ones. */
+const processes = async (): Promise<WindowsProcess[]> => runningProcesses
+
+function scripted(cleaner: AppCleaner): AppCleaner {
+    if (cleaner.id === 'codex-releases') return new CodexInstallationCleaner(sandbox.paths, processes)
+    if (cleaner.id === 'vite-plus-releases') return new VitePlusInstallationCleaner(sandbox.paths, {}, processes)
+    if (cleaner.id === 'claude-code-versions') {
+        return new ClaudeCodeInstallationCleaner(sandbox.paths, async () => ({ exitCode: 0, stdout: '2.1.326 (Claude Code)', stderr: '' }), processes)
+    }
+    return cleaner
+}
+
 async function dryRun(category: CleanupCategoryId): Promise<{
     session: CleanupSession
     removedTargets: string[]
@@ -46,7 +61,7 @@ async function dryRun(category: CleanupCategoryId): Promise<{
 }> {
     const cleaners = cleanersForCategories(createCleaners(sandbox.paths), [category])
         .filter((cleaner) => !liveSystemCleaners.has(cleaner.id))
-        .map((cleaner) => (cleaner.id === 'codex-releases' ? new CodexInstallationCleaner(sandbox.paths, async () => runningProcesses) : cleaner))
+        .map((cleaner) => scripted(cleaner))
     const session: CleanupSession = {
         audit: await AuditLogger.create(join(sandbox.root, 'logs')),
         summary: newSummary(),
@@ -133,5 +148,31 @@ describe('dry run per cleanup category', () => {
         expect(previewed.toSorted((left, right) => left.localeCompare(right))).toEqual([`app-server-daemon ${daemonOld}`, `standalone ${rollback}`])
         expect(log).not.toContain(daemonSelected + '"')
         expect(removedTargets).toEqual([])
+    })
+
+    test('old-installation cleanup previews obsolete Vite+, Claude Code, and VS Code data and preserves the rest', async () => {
+        // Releases are pnpm installs in the split data directory, and Vite+ 1.7 or later keeps an installation lock there.
+        for (const version of ['1.7.0', '1.8.0', '1.9.0', '1.10.0']) await addVitePlusRelease(sandbox, version, vitePlusSplitData)
+        await selectVitePlusRelease(sandbox, '1.9.0', vitePlusSplitData)
+        await sandbox.file(join(vitePlusSplitData, '.previous-version'), '1.8.0')
+        await sandbox.file(join(vitePlusSplitData, '.install.lock'), '')
+
+        const claude = join(home, '.local', 'share', 'claude', 'versions')
+        for (const version of ['2.1.325', '2.1.326', '2.1.327']) await sandbox.file(join(claude, version))
+        await sandbox.file(join(home, '.local', 'bin', 'claude.exe'))
+
+        const extensions = join(home, '.vscode', 'extensions')
+        for (const folder of ['a.old-1.0.0', 'a.old-2.0.0', 'b.ext-1.0.0']) await sandbox.file(join(extensions, folder, 'package.json'), '{}')
+        await sandbox.file(join(extensions, 'extensions.json'), JSON.stringify([{ relativeLocation: 'a.old-2.0.0' }, { relativeLocation: 'b.ext-1.0.0' }]))
+        await sandbox.file(join(extensions, '.obsolete'), JSON.stringify({ 'a.old-1.0.0': true, 'a.old-2.0.0': true }))
+
+        const { session, log, removedTargets } = await dryRun('old-installations')
+        const previewed = [...log.matchAll(/"candidate":"([^"]+)"/g)].map((match) => match[1] ?? '').toSorted()
+        expect([...session.selectedCleaners].toSorted()).toEqual(['claude-code-versions', 'vite-plus-releases', 'vscode-extensions'])
+        expect(previewed).toEqual(['Claude Code 2.1.325', 'VS Code extension a.old-1.0.0', 'Vite+ 1.7.0'])
+        expect(removedTargets).toEqual([])
+        for (const path of [join(vitePlusSplitData, '1.7.0'), join(claude, '2.1.325'), join(extensions, 'a.old-1.0.0')]) {
+            expect(await pathExists(join(sandbox.root, path))).toBe(true)
+        }
     })
 })

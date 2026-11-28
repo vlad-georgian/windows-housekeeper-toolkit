@@ -52,6 +52,20 @@ export async function inspectCanonicalEntry(path: string, linkCount = 1n): Promi
     return stats
 }
 
+/**
+ * Inspects an entry inside a verified tree whose links are unlinked rather than followed. A link
+ * is returned as is, without resolving its target. Other entries must be plain files, with any
+ * hardlink count, or plain directories.
+ */
+export async function inspectTreeEntry(path: string): Promise<BigIntStats> {
+    const stats = await lstat(path, { bigint: true })
+    if (stats.isSymbolicLink()) return stats
+    if ((!stats.isDirectory() && !stats.isFile()) || canonicalPathKey(await realpath(path)) !== canonicalPathKey(path)) {
+        throw new UnverifiedPathError(`Could not verify the filesystem entry at ${path}.`)
+    }
+    return stats
+}
+
 export async function resolveTarget(path: string, allowedRoot: string, linkCount = 1n): Promise<ResolvedTarget> {
     if (!isPathInside(path, allowedRoot)) {
         throw new UnverifiedPathError(`${path} is outside its expected application directory.`)
@@ -106,10 +120,10 @@ export async function listDirectoryNames(path: string): Promise<string[]> {
     }
 }
 
-export async function readSmallTextFile(path: string, allowedRoot: string): Promise<string | null> {
+export async function readSmallTextFile(path: string, allowedRoot: string, maxBytes = 131072n): Promise<string | null> {
     try {
         const target = await resolveTarget(path, allowedRoot)
-        if (!target.stats.isFile() || target.stats.size > 131072n) return null
+        if (!target.stats.isFile() || target.stats.size > maxBytes) return null
         return await readFile(target.path, 'utf8')
     } catch (error) {
         if (error instanceof UnverifiedPathError || isUnavailablePath(error)) return null
