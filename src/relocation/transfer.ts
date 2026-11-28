@@ -6,6 +6,7 @@ import { dirname } from 'node:path'
 import { canonicalPathKey, isPathInside } from '../core/filesystem/index.ts'
 import { entryIdentity, hasErrorCode } from '../core/filesystem/paths.ts'
 import { errorMessage, formatBytes } from '../core/format.ts'
+import { moveExclusive } from '../windows/exclusive-move.ts'
 import type { ReclamationEntry, ReclamationGuard } from '../windows/reclaim-tree.ts'
 import { createDestinationParents, inspectDestinationPath, inspectDirectoryPath, type DirectoryIdentity, requireDirectoryIdentity, storedLinkTarget } from './directory-path.ts'
 import type { OriginalLink } from './inspect.ts'
@@ -55,6 +56,8 @@ export interface TransferOptions {
     readonly afterVerifyingSurvivor?: (record: RecoveryRecord) => void | Promise<void>
     readonly failReclamationAfter?: number
     readonly beforePhase?: (phase: TransferPhase) => void | Promise<void>
+    /** Runs just before each set-aside or rollback move. Tests occupy the target here to simulate a racing writer. */
+    readonly beforeMove?: (from: string, to: string) => void | Promise<void>
 }
 
 export interface TransferResult {
@@ -262,6 +265,17 @@ async function transferPath(action: 'move' | 'restore', transfer: DirectoryTrans
         return [...originalParents, ...directories.filter((directory) => canonicalPathKey(directory.path) !== canonicalPathKey(destination)), ...sourceParents]
     }
 
+    /** `rename` would replace a file that appeared at `to`; this fails closed instead. */
+    async function move(from: string, to: string) {
+        await options.beforeMove?.(from, to)
+        try {
+            await moveExclusive(from, to)
+        } catch (error) {
+            if (hasErrorCode(error, 'EEXIST')) throw new DestinationConflictError(`${to} already exists. Move or remove it, then try again.`, { cause: error })
+            throw error
+        }
+    }
+
     async function removeStagingAlias(staged: TreeManifest) {
         if (options.removeStagingAlias) {
             await options.removeStagingAlias(staging)
@@ -295,16 +309,14 @@ async function transferPath(action: 'move' | 'restore', transfer: DirectoryTrans
         if (moving) {
             if (forwardingAside && transfer.forwarding) {
                 await verifyOriginalLink(destination, transfer.forwarding)
-                await requireAbsent(forwardingAside)
-                await rename(destination, forwardingAside)
+                await move(destination, forwardingAside)
                 forwardingMoved = true
             }
             await placeCopy(staging, destination, file)
             published = true
             if (file) await removeStagingAlias(copy)
         }
-        await requireAbsent(aside)
-        await rename(original, aside)
+        await move(original, aside)
         setAside = true
         if ((await objectIdentity(aside)) !== liveIdentity) throw new Error(`${aside} changed during the swap.`)
         if (moving) {
@@ -328,15 +340,13 @@ async function transferPath(action: 'move' | 'restore', transfer: DirectoryTrans
             }
             if (published && !moving && copy) await removeTree(original, copy, copy.entries[0]?.identity, undefined, undefined, { guards: parents() })
             if (setAside) {
-                await requireAbsent(original)
                 if ((await objectIdentity(aside)) !== liveIdentity) throw new Error(`${aside} changed.`, { cause: error })
-                await rename(aside, original)
+                await move(aside, original)
             }
             if (published && moving && copy) await removeTree(destination, copy, copy.entries[0]?.identity, undefined, undefined, { guards: parents() })
             if (forwardingMoved && forwardingAside && transfer.forwarding) {
-                await requireAbsent(destination)
                 if ((await objectIdentity(forwardingAside)) !== transfer.forwarding.identity) throw new Error(`${forwardingAside} changed.`, { cause: error })
-                await rename(forwardingAside, destination)
+                await move(forwardingAside, destination)
             }
             if (await lstatIfPresent(staging)) {
                 if (!copy) throw new Error(`Keep the partial copy at ${staging} for inspection.`, { cause: error })
@@ -384,8 +394,7 @@ async function transferPath(action: 'move' | 'restore', transfer: DirectoryTrans
             retiringTree = undefined
             if (backingAside) {
                 // Preserve the previous mirror name for consumers after its backing copy is released.
-                await requireAbsent(backingAside)
-                await rename(source, backingAside)
+                await move(source, backingAside)
                 await symlink(original, source, file ? 'file' : 'junction')
                 forwardingIdentity = await objectIdentity(source)
                 if (canonicalPathKey(await storedLinkTarget(source)) !== canonicalPathKey(original) || canonicalPathKey(await realpath(source)) !== canonicalPathKey(finalRoot))

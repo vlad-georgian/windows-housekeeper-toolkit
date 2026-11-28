@@ -205,6 +205,32 @@ test.each(['move', 'restore'] as const)('undoes a file %s when removing the stag
     expect(await journal.list()).toEqual([])
 })
 
+test('a file written at the original during rollback is kept and recovery is retained', async () => {
+    const original = await sandbox.file('Users/test/.claude.json', 'keep')
+    const base = await sandbox.directory('Other')
+    const destination = join(base, 'test', '.claude.json')
+    const journal = createRecoveryJournal(sandbox.paths)
+    const transfer = { appId: 'claude-code', original, base, destination, kind: 'file' as const }
+    await moveDirectory(transfer, { journal })
+    const error = await rejection(
+        restoreDirectory(transfer, {
+            journal,
+            async removeStagingAlias() {
+                throw new Error('staging alias removal failed')
+            },
+            async beforeMove(from, to) {
+                if (to === original && from.endsWith('.aside')) await writeFile(original, 'written by the app')
+            }
+        })
+    )
+    expect(error).toBeInstanceOf(IncompleteTransferError)
+    expect(await readFile(original, 'utf8')).toBe('written by the app')
+    const [record] = await journal.list()
+    expect(record).toMatchObject({ action: 'restore', original, destination })
+    expect((await lstat(record?.aside ?? '')).isSymbolicLink()).toBe(true)
+    expect(await readFile(destination, 'utf8')).toBe('keep')
+})
+
 test('a destination replaced while recording ownership keeps recovery and stays unowned', async () => {
     const original = await sandbox.file('Users/test/.claude.json', 'primary')
     const base = await sandbox.directory('Other')
