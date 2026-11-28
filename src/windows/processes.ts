@@ -5,6 +5,8 @@ export interface WindowsProcess {
     readonly name: string
     readonly path?: string | null
     readonly commandLine?: string | null
+    /** The parent process ID, when Windows reports it. */
+    readonly parentId?: number | null
 }
 
 export type ProcessLister = () => Promise<readonly WindowsProcess[]>
@@ -20,7 +22,8 @@ function isWindowsProcess(value: unknown): value is WindowsProcess {
         'path' in value &&
         (typeof value.path === 'string' || value.path === null) &&
         'commandLine' in value &&
-        (typeof value.commandLine === 'string' || value.commandLine === null)
+        (typeof value.commandLine === 'string' || value.commandLine === null) &&
+        (!('parentId' in value) || typeof value.parentId === 'number' || value.parentId === null)
     )
 }
 
@@ -32,8 +35,8 @@ export async function listWindowsProcesses(): Promise<WindowsProcess[]> {
         try {
             output = await runPowerShell(
                 `
-        $items = @(Get-CimInstance Win32_Process -Property ProcessId, Name, ExecutablePath, CommandLine | ForEach-Object {
-          @{ id = [int]$_.ProcessId; name = [string]$_.Name; path = $_.ExecutablePath; commandLine = $_.CommandLine }
+        $items = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine | ForEach-Object {
+          @{ id = [int]$_.ProcessId; parentId = [int]$_.ParentProcessId; name = [string]$_.Name; path = $_.ExecutablePath; commandLine = $_.CommandLine }
         })
         ConvertTo-Json -InputObject $items -Compress
       `,

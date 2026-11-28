@@ -154,6 +154,34 @@ export async function measureTree(root: string, seen = new Set<string>()): Promi
     return countFiles(await inventory(root, root, false), seen)
 }
 
+/** A file with hard-link names outside the inventoried trees. */
+export interface ExternalHardLink {
+    /** The first name found inside the trees. */
+    readonly path: string
+    /** The trees that hold a name of this file. */
+    readonly roots: readonly string[]
+    readonly bytes: number
+}
+
+/**
+ * Files under `roots` whose link count exceeds the names found under all of them. A copy on
+ * another drive cannot keep those outside names linked to the moved data.
+ */
+export async function externalHardLinks(roots: readonly string[]): Promise<ExternalHardLink[]> {
+    const files = new Map<string, { path: string; roots: Set<string>; links: number; names: number; bytes: number }>()
+    for (const root of roots) {
+        for (const entry of (await inventory(root, root, false)).entries) {
+            if (entry.kind !== 'file' || entry.links < 2) continue
+            const known = files.get(entry.identity)
+            if (known) {
+                known.names++
+                known.roots.add(root)
+            } else files.set(entry.identity, { path: join(root, entry.path), roots: new Set([root]), links: entry.links, names: 1, bytes: entry.bytes })
+        }
+    }
+    return [...files.values()].filter((file) => file.links > file.names).map(({ path, roots: owners, bytes }) => ({ path, roots: [...owners], bytes }))
+}
+
 export async function snapshotTree(root: string): Promise<TreeManifest> {
     const manifest = await inventory(root, root, true)
     return { ...manifest, permissions: await readPermissions(root, manifest.entries) }

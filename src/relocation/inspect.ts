@@ -6,6 +6,7 @@ import { entryIdentity, hasErrorCode, isPathInside, isUnavailablePath, Unverifie
 import { errorMessage } from '../core/format.ts'
 import { windowsDriveType } from '../windows/drives.ts'
 import { inspectDirectoryPath, storedLinkTarget } from './directory-path.ts'
+import type { MirrorOwner } from './journal.ts'
 import { type BaseValidationOptions, differentVolumes, mirroredPath, relocationBaseOf, validateRelocationBase } from './layout.ts'
 import type { RelocatableApp, RelocationPath } from './types.ts'
 
@@ -27,6 +28,11 @@ export type PathState =
 export interface InspectedPath extends RelocationPath {
     readonly verifiedLegacy?: boolean
     readonly nativeDependency?: boolean
+    /**
+     * The toolkit recorded this link, but the app's ownership evidence is gone, for example after
+     * the last global package was removed. The path can be restored but not moved again.
+     */
+    readonly unverifiedOwnership?: true
     readonly state: PathState
 }
 
@@ -80,15 +86,23 @@ export async function inspectApp(
     home: string,
     validation: RelocationValidation = { driveType: windowsDriveType, volumesDiffer: differentVolumes }
 ): Promise<AppInspection | { blocked: string }> {
+    if (app.blocked) return { blocked: app.blocked }
     const outside = app.paths.find((entry) => !isPathInside(entry.path, home))
     if (outside) return { blocked: `${outside.path} is outside the Windows profile ${home}` }
     const inspected: InspectedPath[] = []
     for (const entry of app.paths) {
         let state = await inspectPath(entry.path, entry.kind, entry.verifyLegacyTarget)
+        let unverifiedOwnership = false
         if (entry.verifyDirectory) {
-            if (state.kind === 'unsupported') continue
+            // Optional package paths need positive evidence before they are offered. A link the
+            // toolkit recorded stays visible, so its data can always be restored or explained.
+            const recorded = state.kind === 'linked' || state.kind === 'unsupported' ? await validation.owner?.(entry.path) : undefined
+            if (state.kind === 'unsupported' && !recorded) continue
             if (state.kind === 'linked' && !relocationBaseOf(state.target, home, entry.path)) continue
-            if ((state.kind === 'local' || state.kind === 'linked') && !(await entry.verifyDirectory(state.kind === 'linked' ? state.target : entry.path))) continue
+            if ((state.kind === 'local' || state.kind === 'linked') && !(await entry.verifyDirectory(state.kind === 'linked' ? state.target : entry.path))) {
+                if (state.kind !== 'linked' || !recordedMirror(recorded, state)) continue
+                unverifiedOwnership = true
+            }
         }
         if (entry.verifyFile && (state.kind === 'local' || state.kind === 'linked') && !(await entry.verifyFile(state.kind === 'linked' ? state.target : entry.path))) {
             state = { kind: 'unsupported', reason: `Could not verify the app owns ${entry.path}` }
@@ -98,7 +112,7 @@ export async function inspectApp(
             !!entry.verifyLegacyTarget &&
             basename(state.target).toLowerCase() === basename(entry.path).toLowerCase() &&
             (await entry.verifyLegacyTarget(state.target))
-        inspected.push({ ...entry, state, verifiedLegacy })
+        inspected.push({ ...entry, state, verifiedLegacy, ...(unverifiedOwnership && { unverifiedOwnership: true }) })
     }
     const applicable = inspected
         .filter((entry) => entry.state.kind !== 'missing')
@@ -110,7 +124,15 @@ export async function inspectApp(
     return summarizeApp(app, applicable, home, validation)
 }
 
-type RelocationValidation = Pick<BaseValidationOptions, 'driveType' | 'volumesDiffer'>
+type RelocationValidation = Pick<BaseValidationOptions, 'driveType' | 'volumesDiffer'> & {
+    /** The toolkit's identity receipt for a destination it created. */
+    readonly owner?: (original: string) => Promise<MirrorOwner | undefined>
+}
+
+/** Whether the toolkit's receipt proves it created the directory this link targets. */
+export function recordedMirror(owner: MirrorOwner | undefined, link: OriginalLink): boolean {
+    return !!owner && !owner.forwarding && owner.identity === link.targetIdentity && canonicalPathKey(owner.path) === canonicalPathKey(link.target)
+}
 
 async function summarizeApp(
     app: RelocatableApp,

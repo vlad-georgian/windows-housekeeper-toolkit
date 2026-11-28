@@ -8,11 +8,11 @@ import { cancelled, type Cancelled, type LaunchOperation, type LaunchPrompts, ty
 import type { DriveTypeLookup } from '../windows/drives.ts'
 import { isAppRunning, type WindowsProcess } from '../windows/processes.ts'
 import { type DirectoryIdentity, inspectDestinationPath, readDirectoryIdentity } from './directory-path.ts'
-import { type AppInspection, claimRelocationPaths, type OriginalLink, inspectApp, inspectPath, moveSteps } from './inspect.ts'
+import { type AppInspection, claimRelocationPaths, type OriginalLink, inspectApp, inspectPath, moveSteps, recordedMirror } from './inspect.ts'
 import type { RecoveryJournal } from './journal.ts'
 import { relocationBaseOf, validateRelocationBase, type VolumeComparison } from './layout.ts'
 import { IncompleteTransferError, linksTo, moveDirectory, restoreDirectory, type TransferResult } from './transfer.ts'
-import { type CopiedFiles, measureTree, UnsupportedTreeError } from './tree.ts'
+import { type CopiedFiles, externalHardLinks, measureTree, UnsupportedTreeError } from './tree.ts'
 import type { RelocatableApp } from './types.ts'
 
 /** An outcome of applying, or previewing, one app's relocation. */
@@ -48,6 +48,8 @@ interface PathTransfer {
     readonly forwarding?: OriginalLink
     readonly nativeDependency?: boolean
     readonly retained?: true
+    /** Restore on the strength of the toolkit's receipt, because the app's ownership evidence is gone. */
+    readonly recordedOnly?: true
     readonly linkTargets?: ReadonlyMap<string, { from: string; to: string }>
     readonly original: string
     readonly destination: string
@@ -107,10 +109,10 @@ async function sizeOf(path: string, seen: Set<string>): Promise<{ size: string }
 }
 
 async function checklistHint(inspection: AppInspection): Promise<string> {
+    const unverified = inspection.applicable.find((entry) => entry.unverifiedOwnership)
+    if (unverified) return `${unverified.path} no longer shows ${inspection.app.label} data. Leave clear to restore it.`
     if (inspection.migratedBase) return `On ${inspection.migratedBase}`
     if (inspection.restoreBase) return `Partially migrated to ${inspection.restoreBase}. Check to finish moving, or leave clear to restore.`
-    const blocked = inspection.applicable.find((entry) => entry.state.kind === 'unsupported')
-    if (blocked?.state.kind === 'unsupported') return blocked.state.reason
     const seen = new Set<string>()
     const local = inspection.applicable.filter((entry) => entry.state.kind === 'local')
     let bytes = 0
@@ -126,19 +128,34 @@ async function checklistHint(inspection: AppInspection): Promise<string> {
     return `${formatBytes(bytes)} local${linked > 0 ? `, ${linked} path(s) already linked` : ''}`
 }
 
+/**
+ * The toolkit's own process and the launcher wrappers that started it, such as `vp run start`
+ * and `bun run`. The chain ends at the first ancestor that is not a launcher. Without parent
+ * process IDs, only the toolkit itself is exempt.
+ */
+export function toolkitProcessIds(processes: readonly WindowsProcess[], self = process.pid): ReadonlySet<number> {
+    const byId = new Map(processes.map((entry) => [entry.id, entry]))
+    const own = new Set([self])
+    for (let current = byId.get(self); typeof current?.parentId === 'number' && !own.has(current.parentId);) {
+        const parent = byId.get(current.parentId)
+        if (!parent || !/^(vp|vpr|bun|node)\.exe$/iu.test(parent.name)) break
+        own.add(parent.id)
+        current = parent
+    }
+    return own
+}
+
 function isActionRunning(action: AppAction, processes: readonly WindowsProcess[]): boolean {
-    const guard = action.app.processGuardId
-    const packageProcesses =
-        guard === 'vite-plus-relocation' || guard === 'bun-relocation'
-            ? processes.filter((entry) => {
-                  const args = entry.commandLine?.replace(/^(?:"[^"]+"|\S+)\s*/u, '').replaceAll('\\', '/')
-                  // The normal CLI launch can leave these wrappers alive. Neither wrapper uses
-                  // the package data, and the paths below still guard any runtime inside it.
-                  if (/^vp\.exe$/iu.test(entry.name) && args === 'run start') return false
-                  return !(/^bun\.exe$/iu.test(entry.name) && args === 'run src/index.ts')
-              })
-            : processes
-    if (isAppRunning(guard, packageProcesses)) return true
+    const own = toolkitProcessIds(processes)
+    // The toolkit's launcher chain matches the Bun and Vite+ name guards. The path checks below
+    // still guard a launcher that runs from inside a moved tree.
+    if (
+        isAppRunning(
+            action.app.processGuardId,
+            processes.filter((entry) => !own.has(entry.id))
+        )
+    )
+        return true
     const directories = action.transfers.flatMap((entry) => {
         if (entry.kind === 'file') return []
         return [entry.original, entry.destination, ...(entry.originalLink ? [entry.originalLink.target] : [])]
@@ -152,6 +169,38 @@ function isActionRunning(action: AppAction, processes: readonly WindowsProcess[]
                 return command?.includes(`${canonicalPathKey(directory)}\\`) ?? false
             })
     )
+}
+
+/**
+ * Hard-link names outside the transferred trees, under each path's policy. A copy on another
+ * drive cannot keep those names linked, so a refusing path blocks the action.
+ */
+async function hardLinkPlan(app: RelocatableApp, transfers: readonly PathTransfer[]): Promise<{ readonly lines: readonly string[] } | { readonly blocked: string }> {
+    const moving = transfers
+        .filter((entry) => !entry.retained && entry.kind === 'directory')
+        .map((entry) => ({ entry, policy: app.paths.find((path) => path.path === entry.original)?.hardLinks, physical: entry.originalLink?.target ?? entry.original }))
+    if (!moving.some(({ policy }) => policy)) return { lines: [] }
+    let external
+    try {
+        external = await externalHardLinks(moving.map(({ physical }) => physical))
+    } catch (error) {
+        if (error instanceof UnsupportedTreeError) return { blocked: error.message.replace(/\.$/u, '') }
+        throw error
+    }
+    for (const { entry, policy, physical } of moving) {
+        const files = external.filter((file) => file.roots.includes(physical))
+        if (policy === 'refuse-external' && files[0]) {
+            return {
+                blocked: `${files[0].path} is hard-linked to a name outside ${entry.original}, as Scoop does for persisted files. ${files.length} file(s) would lose that link on another drive`
+            }
+        }
+    }
+    const reported = external.filter((file) => moving.some(({ policy, physical }) => policy === 'report-external' && file.roots.includes(physical)))
+    if (reported.length === 0) return { lines: [] }
+    const bytes = reported.reduce((total, file) => total + file.bytes, 0)
+    return {
+        lines: [`    ${reported.length} hard-linked file(s) (${formatBytes(bytes)}) also have names outside these paths. Those names keep their own copies where they are.`]
+    }
 }
 
 async function askForBase(prompts: LaunchPrompts, options: RelocationOptions, originals: readonly string[], suggestion: string | null): Promise<string | Cancelled> {
@@ -179,6 +228,9 @@ async function planMove(inspection: AppInspection, base: string, home: string, j
     const dependencies = steps.filter((step) => step.kind === 'move' && step.nativeDependency)
     for (const step of [...dependencies, ...steps.filter((candidate) => !(candidate.kind === 'move' && candidate.nativeDependency))]) {
         if (step.kind === 'blocked') return { blocked: step.reason }
+        if (step.kind === 'move' && inspection.applicable.find((entry) => entry.path === step.path)?.unverifiedOwnership) {
+            return { blocked: `${step.path} no longer shows ${inspection.app.label} data. Leave it clear to restore it instead` }
+        }
         const destination = await planDestination(base, step.destination, step.kind === 'in-place' && !step.file ? 'restore' : 'move')
         if ('blocked' in destination) return destination
         if (step.kind === 'in-place') {
@@ -227,7 +279,9 @@ async function planMove(inspection: AppInspection, base: string, home: string, j
             ...(step.nativeDependency && { nativeDependency: true })
         })
     }
-    return { action: { app: inspection.app, action: 'move', base, transfers: [...retained, ...transfers] }, lines }
+    const links = await hardLinkPlan(inspection.app, transfers)
+    if ('blocked' in links) return links
+    return { action: { app: inspection.app, action: 'move', base, transfers: [...retained, ...transfers] }, lines: [...lines, ...links.lines] }
 }
 
 /** Plans a restore, or returns why the app cannot be restored. Nothing changes on disk. */
@@ -253,10 +307,13 @@ async function planRestore(inspection: AppInspection, base: string, journal: Rec
             destination: entry.state.target,
             kind: entry.kind ?? 'directory',
             expectedIdentity: entry.state.identity,
-            originalLink: entry.state
+            originalLink: entry.state,
+            ...(entry.unverifiedOwnership && { recordedOnly: true })
         })
     }
-    return { action: { app: inspection.app, action: 'restore', base, transfers }, lines }
+    const links = await hardLinkPlan(inspection.app, transfers)
+    if ('blocked' in links) return links
+    return { action: { app: inspection.app, action: 'restore', base, transfers }, lines: [...lines, ...links.lines] }
 }
 
 async function applyAction(action: AppAction, prompts: LaunchPrompts, options: RelocationOptions): Promise<void> {
@@ -272,6 +329,21 @@ async function applyAction(action: AppAction, prompts: LaunchPrompts, options: R
         await options.report({ kind: 'skipped', appId: app.id, reason })
         return
     }
+    const links = await hardLinkPlan(app, action.transfers)
+    if ('blocked' in links) {
+        const pending = action.transfers.filter((entry) => !entry.retained).map((entry) => entry.original)
+        prompts.log(`${app.label}: ${links.blocked}. Nothing was changed.`)
+        await options.report({
+            kind: 'failed',
+            appId: app.id,
+            action: action.action,
+            original: pending[0] ?? '',
+            error: new Error(links.blocked),
+            completed: [],
+            notAttempted: pending
+        })
+        return
+    }
     const transfer = action.action === 'move' ? moveDirectory : restoreDirectory
     const aliasKey = JSON.stringify([app.id, action.action, canonicalPathKey(action.base)])
     const copiedFiles: CopiedFiles = (await options.journal.readAliases?.(aliasKey)) ?? new Map()
@@ -279,7 +351,7 @@ async function applyAction(action: AppAction, prompts: LaunchPrompts, options: R
         await options.journal.saveAliases?.(aliasKey, aliases)
     }
     const completed: string[] = []
-    for (const [index, { original, destination, destinationDirectories, nativeDependency, linkTargets, retained, ...source }] of action.transfers.entries()) {
+    for (const [index, { original, destination, destinationDirectories, nativeDependency, linkTargets, retained, recordedOnly, ...source }] of action.transfers.entries()) {
         let result: TransferResult
         try {
             if (retained) {
@@ -298,7 +370,10 @@ async function applyAction(action: AppAction, prompts: LaunchPrompts, options: R
             const entry = app.paths.find((path) => path.path === original)
             const physical = source.originalLink?.target ?? original
             if (entry?.verifyFile && !(await entry.verifyFile(physical))) throw new Error(`Could not verify the app owns ${original}.`)
-            if (entry?.verifyDirectory && !(await entry.verifyDirectory(physical))) throw new Error(`Could not verify the app owns ${original}.`)
+            if (recordedOnly) {
+                if (action.action !== 'restore' || !source.originalLink || !recordedMirror(await options.journal.owner(original), source.originalLink))
+                    throw new Error(`Could not verify that the toolkit created ${physical}.`)
+            } else if (entry?.verifyDirectory && !(await entry.verifyDirectory(physical))) throw new Error(`Could not verify the app owns ${original}.`)
             if (
                 action.action === 'move' &&
                 source.originalLink &&
@@ -340,7 +415,28 @@ async function applyAction(action: AppAction, prompts: LaunchPrompts, options: R
         await options.report({ kind: action.action === 'move' ? 'moved' : 'restored', appId: app.id, original, destination, bytes: result.bytes })
     }
     if (copiedFiles.size) await recordAliases(new Map())
+    if (action.action === 'restore') {
+        const remaining = await stillRelocated(app, action.base, options.home)
+        if (remaining.length > 0) {
+            for (const path of remaining) prompts.log(`${app.label}: ${path} still links under ${action.base}.`)
+            prompts.log('Return to the relocation checklist to restore the remaining paths after fixing the problem.')
+            const error = new Error(`${remaining.join(', ')} still link under ${action.base}`)
+            await options.report({ kind: 'failed', appId: app.id, action: 'restore', original: remaining[0] ?? '', error, completed, notAttempted: remaining })
+            return
+        }
+    }
     prompts.log(action.action === 'move' ? `Moved ${app.label} to ${action.base}.` : `Restored ${app.label} to its original paths.`)
+}
+
+/** The app's paths that still link to its mirror under `base` after a restore. */
+async function stillRelocated(app: RelocatableApp, base: string, home: string): Promise<string[]> {
+    const remaining: string[] = []
+    for (const entry of app.paths) {
+        const state = await inspectPath(entry.path, entry.kind)
+        const linkedBase = state.kind === 'linked' ? relocationBaseOf(state.target, home, entry.path) : null
+        if (linkedBase && canonicalPathKey(linkedBase) === canonicalPathKey(base)) remaining.push(entry.path)
+    }
+    return remaining
 }
 
 /**
@@ -362,7 +458,7 @@ export function createRelocationOperation(options: RelocationOptions): LaunchOpe
             }
             const catalog: AppInspection[] = []
             for (const app of options.catalog) {
-                const inspection = await inspectApp(app, options.home, options)
+                const inspection = await inspectApp(app, options.home, { ...options, owner: (original) => options.journal.owner(original) })
                 if ('blocked' in inspection) {
                     if (!held.has(app.id)) prompts.log(`${app.label} cannot be relocated. ${inspection.blocked}`)
                     continue

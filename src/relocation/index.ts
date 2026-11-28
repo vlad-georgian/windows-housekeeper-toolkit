@@ -16,9 +16,15 @@ function auditDetails(event: RelocationEvent): Record<string, unknown> {
 
 /** The launch-menu relocation operation for the current user, recorded in the run's audit log. */
 export function createRelocationLaunchOperation(paths: SystemPaths, session: CleanupSession): LaunchOperation {
-    const catalog = createRelocationCatalog(paths, process.env, async () =>
-        runPowerShell("[Environment]::GetEnvironmentVariable('ChocolateyInstall', 'Machine')", undefined, 5_000).catch(() => null)
-    )
+    const catalog = createRelocationCatalog(paths, {
+        env: process.env,
+        // An empty machine value means Chocolatey has no machine-scope install. A failed lookup is `null`.
+        machineChocolatey: async () =>
+            runPowerShell("[Environment]::GetEnvironmentVariable('ChocolateyInstall', 'Machine')", undefined, 5_000).then(
+                (value) => value || undefined,
+                () => null
+            )
+    })
     const labelOf = (appId: string): string => catalog.find((app) => app.id === appId)?.label ?? appId
     return createRelocationOperation({
         home: paths.home,

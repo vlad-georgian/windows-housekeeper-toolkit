@@ -10,6 +10,11 @@ export interface RelocationPath {
     /** Require ownership evidence for an optional package-manager path. */
     readonly verifyDirectory?: (target: string) => Promise<boolean>
     readonly kind?: 'directory' | 'file'
+    /**
+     * Files whose hard-link names reach outside the moved paths lose that link on another drive.
+     * `refuse-external` blocks the move or restore. `report-external` lists the files in the plan.
+     */
+    readonly hardLinks?: 'refuse-external' | 'report-external'
     /** What the directory holds, such as "installation" or "data". */
     readonly description: string
 }
@@ -24,5 +29,7 @@ export interface RelocatableApp {
     readonly processGuardId: string
     readonly label: string
     readonly preserveMirror?: boolean
+    /** Why the app's active locations cannot be determined. The app is not offered. */
+    readonly blocked?: string
     readonly paths: readonly RelocationPath[]
 }

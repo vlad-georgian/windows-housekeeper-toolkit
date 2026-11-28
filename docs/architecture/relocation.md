@@ -60,10 +60,27 @@ The catalog verifies package paths inside the profile before offering them and
 rechecks ownership at apply time. Standalone Node.js needs a Node executable
 and a bundled npm manifest in a known per-user installation directory.
 
+Each manager's locations come from its own configuration: Scoop's
+`config.json`, npm's user and bundled npmrc files, and Bun's global
+`bunfig.toml`. Environment variables are read from the injected catalog
+sources, never from the ambient process. When two sources disagree, or a file
+cannot be read, the manager is not offered and the checklist log gives the
+reason.
+
+A path the toolkit relocated keeps its identity receipt in
+`relocation-destinations.json`. When the app's ownership evidence later
+disappears, for example after the last npm global package is removed, the
+receipt keeps that path in the checklist so it can be restored, but not moved
+again. A restore that leaves any app path linked under its base is reported as
+failed.
+
 - Scoop moves `apps` after verifying the Scoop launcher in a release under
   that tree. Its `shims` and `persist` directories stay at their original
   locations. The mover re-creates version junctions and keeps app links to
-  persistent data pointed at their existing targets.
+  persistent data pointed at their existing targets. Scoop persists files as
+  hard links between a version and `persist`, and a link cannot span drives.
+  Scoop is held back, at planning and again at apply time, while any file in
+  `apps` has a hard-link name outside it.
   [Scoop folder layout](https://github.com/ScoopInstaller/Scoop/wiki/Scoop-Folder-Layout)
 - Vite+ verifies the launcher and active release manifest before moving its
   managed releases and runtimes. The shared launcher directory stays in place.
@@ -73,7 +90,10 @@ and a bundled npm manifest in a known per-user installation directory.
   [npm folders](https://docs.npmjs.com/cli/configuring-npm/folders/)
 - Bun checks the global installation manifest and lockfile. It can also move
   a verified download cache when that cache has no shared global store.
-  Existing global launchers keep their paths.
+  Existing global launchers keep their paths. Bun hard-links installed files to
+  its cache, so both trees move in one action and keep those links. The plan
+  counts files that also have names elsewhere, such as project installs. Those
+  names keep their own copies on the original drive.
   [Bun configuration](https://bun.com/docs/runtime/bunfig)
 - Chocolatey verifies the user-profile installation layout and checks the
   machine setting before offering to move the package library. The binary

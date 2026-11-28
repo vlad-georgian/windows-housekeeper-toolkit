@@ -4,9 +4,9 @@ import { isAbsolute, join } from 'node:path'
 import { hasErrorCode } from '../../core/filesystem/paths.ts'
 import type { SystemPaths } from '../../core/system-paths.ts'
 import type { RelocatableApp } from '../types.ts'
-import { directEntry, overlaps, type PackageEnvironment, userPath } from './package-evidence.ts'
+import { directEntry, overlaps, type PackageEnvironment, type PackageSources, userPath } from './package-evidence.ts'
 
-export type MachineChocolateyRoot = () => Promise<string | null | undefined>
+export type MachineChocolateyRoot = PackageSources['machineChocolatey']
 
 export function chocolateyRelocation(paths: SystemPaths, env: PackageEnvironment, machineRoot: MachineChocolateyRoot): RelocatableApp {
     const root = userPath(env.ChocolateyInstall, paths)

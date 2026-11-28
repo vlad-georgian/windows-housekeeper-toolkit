@@ -3,18 +3,91 @@ import { join } from 'node:path'
 import { listDirectoryNames, pathExists } from '../../core/filesystem/paths.ts'
 import type { SystemPaths } from '../../core/system-paths.ts'
 import type { RelocatableApp, RelocationPath } from '../types.ts'
-import { directEntry, overlaps, type PackageEnvironment, packageManifest, userPath } from './package-evidence.ts'
+import { agreedPath, directEntry, environmentValue, overlaps, type PackageEnvironment, packageManifest, readConfigFile, userPath } from './package-evidence.ts'
+
+type BunSetting = 'install.globalDir' | 'install.globalBinDir' | 'install.cache.dir'
+const settings: readonly BunSetting[] = ['install.globalDir', 'install.globalBinDir', 'install.cache.dir']
+
+/**
+ * The install locations in one global `bunfig.toml`. Only plain string values are understood.
+ * Any other form of a location setting, such as an inline table, returns a reason instead.
+ */
+function readBunfig(path: string): Partial<Record<BunSetting, string>> | { blocked: string } {
+    const file = readConfigFile(path)
+    if (!file) return {}
+    if ('blocked' in file) return file
+    const found: Partial<Record<BunSetting, string>> = {}
+    let section = ''
+    for (const raw of file.text.split(/\r?\n/u)) {
+        const line = raw.trim()
+        if (!line || line.startsWith('#')) continue
+        const header = /^\[([^[\]]+)\]\s*(?:#.*)?$/u.exec(line)
+        if (header?.[1]) {
+            section = header[1].replaceAll(/\s|"/gu, '')
+            continue
+        }
+        const pair = /^([\w."-]+)\s*=\s*(.*)$/u.exec(line)
+        if (!pair?.[1] || pair[2] === undefined) continue
+        const key = [section, pair[1].replaceAll('"', '')].filter(Boolean).join('.')
+        const setting = settings.find((name) => name === key || name.startsWith(`${key}.`))
+        if (!setting) continue
+        const basic = /^"((?:[^"\\]|\\.)*)"\s*(?:#.*)?$/u.exec(pair[2])
+        const literal = /^'([^']*)'\s*(?:#.*)?$/u.exec(pair[2])
+        const unreadable = { blocked: `${path} sets ${key} in a form the relocation catalog does not read` }
+        if (setting !== key || (!basic && !literal)) return unreadable
+        const decoded: unknown = basic?.[1] === undefined ? literal?.[1] : JSON.parse(`"${basic[1]}"`)
+        if (typeof decoded !== 'string') return unreadable
+        found[setting] = decoded
+    }
+    return found
+}
+
+/**
+ * Bun's install locations from the environment and the global `bunfig.toml`. Bun documents
+ * both sources without an order between them, so they must agree.
+ * [bunfig.toml](https://bun.com/docs/runtime/bunfig#install)
+ */
+function bunLocations(paths: SystemPaths, env: PackageEnvironment) {
+    const root = environmentValue(env, 'BUN_INSTALL') ?? join(paths.home, '.bun')
+    const xdg = environmentValue(env, 'XDG_CONFIG_HOME')
+    const files = [join(paths.home, '.bunfig.toml'), ...(xdg ? [join(xdg, '.bunfig.toml')] : [])]
+    const configs: { source: string; values: Partial<Record<BunSetting, string>> }[] = []
+    for (const source of files) {
+        const values = readBunfig(source)
+        if ('blocked' in values) return values
+        configs.push({ source, values })
+    }
+    function locate(label: string, variable: string, setting: BunSetting, fallback: string) {
+        return agreedPath(
+            label,
+            [{ source: variable, value: environmentValue(env, variable) }, ...configs.map(({ source, values }) => ({ source, value: values[setting] }))],
+            fallback
+        )
+    }
+    return {
+        global: locate('The Bun global directory', 'BUN_INSTALL_GLOBAL_DIR', 'install.globalDir', join(root, 'install', 'global')),
+        cache: locate('The Bun cache directory', 'BUN_INSTALL_CACHE_DIR', 'install.cache.dir', join(root, 'install', 'cache')),
+        bin: locate('The Bun global bin directory', 'BUN_INSTALL_BIN', 'install.globalBinDir', join(root, 'bin'))
+    }
+}
 
 export function bunRelocation(paths: SystemPaths, env: PackageEnvironment): RelocatableApp {
-    const root = env.BUN_INSTALL ?? join(paths.home, '.bun')
-    const global = userPath(env.BUN_INSTALL_GLOBAL_DIR ?? join(root, 'install', 'global'), paths)
-    const cache = userPath(env.BUN_INSTALL_CACHE_DIR ?? join(root, 'install', 'cache'), paths)
-    const bin = env.BUN_INSTALL_BIN ?? join(root, 'bin')
+    const app = { id: 'bun', label: 'Bun', processGuardId: 'bun-relocation' }
+    const locations = bunLocations(paths, env)
+    if ('blocked' in locations) return { ...app, blocked: locations.blocked, paths: [] }
+    for (const location of Object.values(locations)) if ('blocked' in location) return { ...app, blocked: location.blocked, paths: [] }
+    if (!('path' in locations.global && 'path' in locations.cache && 'path' in locations.bin)) return { ...app, paths: [] }
+    const global = userPath(locations.global.path, paths)
+    const cache = userPath(locations.cache.path, paths)
+    const bin = locations.bin.path
     const candidates: RelocationPath[] = []
     if (global && !overlaps(global, bin)) {
         candidates.push({
             path: global,
             description: 'Bun global packages',
+            // Bun installs packages as hard links to its cache. Both trees move in one action, so
+            // only names outside them, such as project installs, keep separate copies.
+            hardLinks: 'report-external',
             async verifyDirectory(target) {
                 const manifest = await packageManifest(target)
                 return (
@@ -30,6 +103,7 @@ export function bunRelocation(paths: SystemPaths, env: PackageEnvironment): Relo
         candidates.push({
             path: cache,
             description: 'Bun download cache',
+            hardLinks: 'report-external',
             async verifyDirectory(target) {
                 // Projects can point into the global store with symlinks. Leave the cache
                 // in place when it contains that shared store.
@@ -41,5 +115,5 @@ export function bunRelocation(paths: SystemPaths, env: PackageEnvironment): Relo
             }
         })
     }
-    return { id: 'bun', label: 'Bun', processGuardId: 'bun-relocation', paths: candidates }
+    return { ...app, paths: candidates }
 }

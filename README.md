@@ -110,7 +110,9 @@ Choose **Move apps to another drive** in the launch menu for Codex, Claude Code,
 Claude Desktop, GitHub Desktop, VS Code extensions, or verified per-user Node.js,
 Vite+, npm, Bun, Scoop, and Chocolatey paths. Scoop and Vite+ carry the
 runtimes they manage. Package launchers keep their original paths, as does
-Scoop's shared persistent data. Windows manages the packaged app binaries.
+Scoop's shared persistent data. Scoop stays in place while an app keeps a
+persisted file as a hard link, because a hard link cannot reach another drive.
+Windows manages the packaged app binaries.
 Migrated applications start checked. For newly checked apps, enter a
 base directory on another fixed local drive. Each path is mirrored under the base,
 your Windows profile name, and its profile-relative path, so

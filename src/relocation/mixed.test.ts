@@ -6,6 +6,7 @@ import { entryIdentity, pathExists } from '../core/filesystem/paths.ts'
 import { cancelled } from '../launch/types.ts'
 import { FakePrompts } from '../test-support/fake-prompts.ts'
 import { createSandbox, type Sandbox } from '../test-support/fixtures.ts'
+import { isolatedPackageSources } from '../test-support/package-sources.ts'
 import { rejection } from '../test-support/rejection.ts'
 import { createRelocationCatalog } from './apps/index.ts'
 import { inspectApp, inspectPath, moveSteps } from './inspect.ts'
@@ -68,7 +69,7 @@ test('consolidates a mixed Claude Code profile and restores the latest data at e
     await symlink(config, configLink, 'file')
     const configId = (await lstat(configLink, { bigint: true })).ino
     const base = join(sandbox.root, 'Other')
-    const catalog = createRelocationCatalog(sandbox.paths)
+    const catalog = createRelocationCatalog(sandbox.paths, isolatedPackageSources)
     const operation = createRelocationOperation({
         catalog,
         home: sandbox.paths.home,
@@ -161,7 +162,7 @@ test('recognizes linked desktop data with a verified legacy layout', async () =>
     await sandbox.file('Legacy/Claude-Data/Claude_pzs8sxrjxfjjc/claude_desktop_config.json', '{}')
     const data = join(sandbox.paths.localAppData, 'Claude-Data')
     await symlink(old, data, 'junction')
-    const app = createRelocationCatalog(sandbox.paths).find((entry) => entry.id === 'claude-desktop')
+    const app = createRelocationCatalog(sandbox.paths, isolatedPackageSources).find((entry) => entry.id === 'claude-desktop')
     if (!app) throw new Error('Missing catalog entry')
     const inspection = await inspectApp(app, sandbox.paths.home)
     if ('blocked' in inspection) throw new Error(inspection.blocked)
@@ -172,7 +173,7 @@ test('recognizes linked desktop data with a verified legacy layout', async () =>
 test('an unrelated launcher at the conventional filename blocks the app', async () => {
     await sandbox.file('Users/test/.local/share/claude/versions/2.1.0', 'release')
     const launcher = await sandbox.file('Users/test/.local/bin/claude.exe', 'unknown')
-    const app = createRelocationCatalog(sandbox.paths).find((entry) => entry.id === 'claude-code')
+    const app = createRelocationCatalog(sandbox.paths, isolatedPackageSources).find((entry) => entry.id === 'claude-code')
     if (!app) throw new Error('Missing catalog entry')
     const inspection = await inspectApp(app, sandbox.paths.home)
     expect(inspection).toEqual({ blocked: `Could not verify the app owns ${launcher}` })
@@ -260,7 +261,7 @@ test('a destination replaced while recording ownership keeps recovery and stays 
 
 function relocationOperation() {
     return createRelocationOperation({
-        catalog: createRelocationCatalog(sandbox.paths),
+        catalog: createRelocationCatalog(sandbox.paths, isolatedPackageSources),
         home: sandbox.paths.home,
         journal: createRecoveryJournal(sandbox.paths),
         dryRun: false,
