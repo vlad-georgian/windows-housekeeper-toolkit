@@ -83,8 +83,8 @@ After a failure before the swap is verified, the transfer attempts to undo
 its changes. Move rollback removes the destination only after successful
 placement and verification against the staging directory's identity and
 contents. It prunes only empty parents it created below the base and can still
-verify by identity. Set-aside and rollback renames never replace an existing
-entry, so a file the app writes at the original path during undo is kept. The
+verify by identity. Set-aside, placement and rollback moves never replace an
+existing entry, so a file the app writes at a target path is kept. The
 record is kept if safe undo or final reclamation fails. The operation holds back the affected app and points to the journal
 and the [manual recovery procedure](../../README.md#recovering-an-interrupted-relocation).
 

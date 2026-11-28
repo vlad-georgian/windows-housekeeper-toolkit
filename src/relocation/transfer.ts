@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Stats } from 'node:fs'
-import { link, lstat, readlink, realpath, rename, rmdir, statfs, symlink } from 'node:fs/promises'
+import { link, lstat, readlink, realpath, rmdir, statfs, symlink } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 import { canonicalPathKey, isPathInside } from '../core/filesystem/index.ts'
@@ -135,12 +135,12 @@ async function verifyOriginalLink(path: string, expected: OriginalLink): Promise
     }
 }
 
-async function placeCopy(staging: string, destination: string, file: boolean): Promise<void> {
-    await requireAbsent(destination)
+async function placeCopy(options: TransferOptions, staging: string, destination: string, file: boolean): Promise<void> {
+    // rename can replace a racing file even when the source is a folder. Both publications are exclusive.
     if (file) {
-        // rename can overwrite a racing file. Creating a hard link is exclusive.
+        await requireAbsent(destination)
         await link(staging, destination)
-    } else await rename(staging, destination)
+    } else await moveEntry(options, staging, destination)
 }
 
 /** Removes empty destination parents created by the current move, stopping below the base. */
@@ -382,7 +382,7 @@ async function swapIntoPlace(plan: TransferPlan, progress: SwapProgress): Promis
             await moveEntry(options, destination, forwardingAside)
             progress.forwardingMoved = true
         }
-        await placeCopy(staging, destination, file)
+        await placeCopy(options, staging, destination, file)
         progress.published = true
         if (file) await removeStagingAlias(plan, copy)
     }
@@ -395,7 +395,7 @@ async function swapIntoPlace(plan: TransferPlan, progress: SwapProgress): Promis
         progress.replacement = await snapshotRelocationLink(original, progress.replacementId, { kind: linkKind, payload: destination })
         if (!(await linksTo(original, destination))) throw new Error(`Could not verify the replacement link at ${original}.`)
     } else {
-        await placeCopy(staging, original, file)
+        await placeCopy(options, staging, original, file)
         progress.published = true
         if (file) await removeStagingAlias(plan, copy)
     }

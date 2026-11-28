@@ -345,6 +345,26 @@ describe('restoring a directory', () => {
         expect(await journal.list()).toEqual([])
     })
 
+    test('keeps a file written at the original before the restored folder is placed', async () => {
+        const transfer = { appId: 'github-desktop', original, destination, base }
+        await moveDirectory(transfer, { journal })
+        const error = await rejection(
+            restoreDirectory(transfer, {
+                journal,
+                async beforeMove(from, to) {
+                    if (to === original && from.endsWith('.restoring')) await writeFile(original, 'written by the app')
+                }
+            })
+        )
+
+        expect(error).toBeInstanceOf(IncompleteTransferError)
+        expect(await readFile(original, 'utf8')).toBe('written by the app')
+        const [record] = await journal.list()
+        expect(record).toMatchObject({ action: 'restore', original, destination })
+        await expectJunction(record?.aside ?? '', destination)
+        expect(await readFile(join(destination, 'Update.exe'), 'utf8')).toBe('updater')
+    })
+
     test('refuses an original path that does not link to the destination', async () => {
         expect(await rejectionMessage(restoreDirectory({ appId: 'github-desktop', original, destination, base }, { journal }))).toContain('does not link to')
         expect((await lstat(original)).isDirectory()).toBe(true)
