@@ -4,6 +4,7 @@ import { canonicalPathKey } from '../core/filesystem/paths.ts'
 import { readState, stateDirectory, writeState } from '../core/state.ts'
 import type { SystemPaths } from '../core/system-paths.ts'
 import type { OriginalLink } from './inspect.ts'
+import type { CopiedFile, CopiedFiles } from './tree.ts'
 
 export const transferPhases = ['copying', 'swapping', 'reclaiming', 'releasing'] as const
 /**
@@ -37,15 +38,22 @@ export interface RecoveryRecord {
     readonly startedAt: string
 }
 
+/** The mirror a completed transfer created for an original, or the forwarding link a restore left at its name. */
+export interface MirrorOwner {
+    readonly path: string
+    readonly identity: string
+    readonly forwarding?: true
+}
+
 /** Recovery records for incomplete relocation transfers. */
 export interface RecoveryJournal {
-    readAliases?(key: string): Promise<import('./tree.ts').CopiedFiles>
-    saveAliases?(key: string, aliases: import('./tree.ts').CopiedFiles): Promise<void>
+    readAliases?(key: string): Promise<CopiedFiles>
+    saveAliases?(key: string, aliases: CopiedFiles): Promise<void>
     /** Where the records are kept, for messages that point the user to them. */
     readonly location: string
     /** Identity of the mirror created for this original by a completed transfer. */
-    owner(original: string): Promise<{ path: string; identity: string; forwarding?: true } | undefined>
-    setOwner(original: string, owner: { path: string; identity: string; forwarding?: true } | null): Promise<void>
+    owner(original: string): Promise<MirrorOwner | undefined>
+    setOwner(original: string, owner: MirrorOwner | null): Promise<void>
     list(): Promise<RecoveryRecord[]>
     save(record: RecoveryRecord): Promise<void>
     remove(id: string): Promise<void>
@@ -83,7 +91,7 @@ export function createRecoveryJournal(paths: SystemPaths): RecoveryJournal {
     const readOwners = async () => {
         const value = await readState<unknown>(paths, ownersName, {})
         if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid relocation destination records.')
-        const owners = new Map<string, { path: string; identity: string; forwarding?: true }>()
+        const owners = new Map<string, MirrorOwner>()
         for (const [key, owner] of Object.entries(value)) {
             if (typeof owner !== 'object' || !owner || !('identity' in owner) || typeof owner.identity !== 'string' || !('path' in owner) || typeof owner.path !== 'string')
                 throw new Error('Invalid relocation destination identity.')
@@ -92,7 +100,7 @@ export function createRecoveryJournal(paths: SystemPaths): RecoveryJournal {
         return owners
     }
     const aliasesName = 'relocation-aliases.json'
-    type AliasState = Record<string, Record<string, { path: string; identity: string; forwarding?: true }>>
+    type AliasState = Record<string, Record<string, CopiedFile>>
     return {
         async readAliases(key) {
             const aliases = await readState<AliasState>(paths, aliasesName, {})

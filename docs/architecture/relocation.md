@@ -12,17 +12,17 @@ compares the inferred volume with the original parent volume. A partial move
 revalidates any installed links before transferring its remaining paths.
 Clearing a migrated app restores the latest contents to the original paths.
 
-| File                                                          | Responsibility                                                                                                                                        |
-| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`apps/`](../../src/relocation/apps)                          | The relocation catalog, one file per app. Each app lists its per-user paths and the process guard ID used to detect it in use.                        |
-| [`index.ts`](../../src/relocation/index.ts)                   | Wires the operation to the current profile, Windows processes, the recovery journal, and the run's audit log and summary.                             |
-| [`operation.ts`](../../src/relocation/operation.ts)           | Shows the app checklist, asks for the base, plans moves and restores, reports conflicts and running apps, and applies or previews the plan.           |
-| [`inspect.ts`](../../src/relocation/inspect.ts)               | Classifies each path as missing, local, linked, or unsupported, decides whether an app is migrated, and plans each path's move under a base.          |
-| [`layout.ts`](../../src/relocation/layout.ts)                 | Builds mirrored paths, recovers a base from a destination, compares volumes, and validates a base.                                                    |
-| [`directory-path.ts`](../../src/relocation/directory-path.ts) | Checks containment and captures directory identities for planning, transfer, and rollback.                                                            |
-| [`transfer.ts`](../../src/relocation/transfer.ts)             | Moves or restores one directory with a verified copy and junction swap, and undoes a transfer interrupted before its swap is verified.                |
-| [`tree.ts`](../../src/relocation/tree.ts)                     | Inventories links without recursing into them, copies hard-linked names by identity, verifies contents and permissions, and removes verified entries. |
-| [`journal.ts`](../../src/relocation/journal.ts)               | Saves a recovery record in `relocation-recovery.json` before each transfer phase and removes it once the transfer finishes.                           |
+| File                                                          | Responsibility                                                                                                                                                   |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`apps/`](../../src/relocation/apps)                          | The relocation catalog, one file per app. Each app lists its per-user paths and the process guard ID used to detect it in use.                                   |
+| [`index.ts`](../../src/relocation/index.ts)                   | Wires the operation to the current profile, Windows processes, the recovery journal, and the run's audit log and summary.                                        |
+| [`operation.ts`](../../src/relocation/operation.ts)           | Shows the app checklist, asks for the base, plans moves and restores, reports conflicts and running apps, and applies or previews the plan.                      |
+| [`inspect.ts`](../../src/relocation/inspect.ts)               | Classifies each path as missing, local, linked, or unsupported, decides whether an app is migrated, and plans each path's move under a base.                     |
+| [`layout.ts`](../../src/relocation/layout.ts)                 | Builds mirrored paths, recovers a base from a destination, compares volumes, and validates a base.                                                               |
+| [`directory-path.ts`](../../src/relocation/directory-path.ts) | Checks containment and captures directory identities for planning, transfer, and rollback.                                                                       |
+| [`transfer.ts`](../../src/relocation/transfer.ts)             | Moves or restores one directory or file with a verified copy and a junction or file-symlink swap, and undoes a transfer interrupted before its swap is verified. |
+| [`tree.ts`](../../src/relocation/tree.ts)                     | Inventories links without recursing into them, copies hard-linked names by identity, verifies contents and permissions, and removes verified entries.            |
+| [`journal.ts`](../../src/relocation/journal.ts)               | Saves a recovery record in `relocation-recovery.json` before each transfer phase and removes it once the transfer finishes.                                      |
 
 ## Codex and Claude ownership
 
@@ -83,8 +83,9 @@ After a failure before the swap is verified, the transfer attempts to undo
 its changes. Move rollback removes the destination only after successful
 placement and verification against the staging directory's identity and
 contents. It prunes only empty parents it created below the base and can still
-verify by identity. The record is kept if safe undo or final reclamation
-fails. The operation holds back the affected app and points to the journal
+verify by identity. Set-aside and rollback renames never replace an existing
+entry, so a file the app writes at the original path during undo is kept. The
+record is kept if safe undo or final reclamation fails. The operation holds back the affected app and points to the journal
 and the [manual recovery procedure](../../README.md#recovering-an-interrupted-relocation).
 
 `windows/reclaim-tree.ts` performs the final reclamation through Windows
@@ -104,7 +105,9 @@ the path identity to its expected stored target when it represents a link. Ances
 order with no-follow handles and checked as plain directories. Junctions are
 checked by file identity and `FSCTL_GET_REPARSE_POINT` for the supported tag
 and exact stored target. The same no-follow check applies to file symlinks. Security descriptors are read with `GetSecurityInfo`
-on the held objects. Regular tree entries still reject all reparse points.
+on the held objects. Inside a tree, only junctions to folders and file
+symlinks to files are supported. Planning reads each link's reparse tag and
+blocks directory symlinks, file symlinks to folders and other reparse points.
 
 A file with several names uses write-denying read handles and a delete handle
 for one verified name at a time. Reclamation enumerates the full alias set and

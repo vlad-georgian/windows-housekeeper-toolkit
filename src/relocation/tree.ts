@@ -262,7 +262,12 @@ export function remapExternalLinks(manifest: TreeManifest, mapping: ReadonlyMap<
     }
 }
 
-export type CopiedFiles = Map<string, { path: string; identity: string }>
+/** A published copy of a hard-linked file, keyed by the source file's identity. */
+export interface CopiedFile {
+    readonly path: string
+    readonly identity: string
+}
+export type CopiedFiles = Map<string, CopiedFile>
 export async function copyTree(source: string, target: string, manifest: TreeManifest, finalRoot: string, previous?: CopiedFiles): Promise<string> {
     let rootIdentity: string | undefined
     for (const entry of manifest.entries) {
