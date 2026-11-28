@@ -210,6 +210,19 @@ export class VitePlusInstallationCleaner extends BaseCleaner {
     }
 
     /** Whether a running process is, or could be running from, the release. Unverifiable counts as in use. */
+    /**
+     * Whether a process names the store's `current` link, as itself or as its script. A runtime
+     * started before an update keeps loading files lazily from the release it started in, yet names
+     * only the link, so the release it uses cannot be told. The whole store is then ambiguous.
+     */
+    private async storeAmbiguous(canonicalHome: string, logicalHome: string | null, snapshot: ProcessLister): Promise<boolean> {
+        const paths = await runningProcessPaths(snapshot, vitePlusProcess)
+        const commandLines = await runtimeCommandLines(snapshot, scriptRuntime)
+        if (paths === null || commandLines === null) return true
+        const links = [...new Set([join(canonicalHome, 'current'), ...(logicalHome ? [join(logicalHome, 'current')] : [])])]
+        return links.some((link) => isPathInUse(link, paths) || isPathReferenced(link, commandLines))
+    }
+
     private async inUse(releases: readonly string[], snapshot: ProcessLister): Promise<boolean> {
         const paths = await runningProcessPaths(snapshot, vitePlusProcess)
         const commandLines = await runtimeCommandLines(snapshot, scriptRuntime)
@@ -243,6 +256,7 @@ export class VitePlusInstallationCleaner extends BaseCleaner {
         const store = await inspectStore(home)
         if (!store) return []
         const snapshot = await this.processSnapshot()
+        if (await this.storeAmbiguous(store.home, logicalHome, snapshot)) return []
 
         const candidates: CleanupCandidate[] = []
         for (const name of await listDirectoryNames(store.home)) {
@@ -276,8 +290,11 @@ export class VitePlusInstallationCleaner extends BaseCleaner {
             if (!store || candidate.id !== `vite-plus:release:${name}` || !(await canRemoveRelease(store, name))) {
                 throw new Error(`The Vite+ release selection changed after detection at ${home}.`)
             }
-            if (await this.inUse(this.spellings(canonicalHome, name, await dataDirectory(this.paths, this.environment)), await this.processSnapshot()))
+            const logicalHome = await dataDirectory(this.paths, this.environment)
+            const snapshot = await this.processSnapshot()
+            if ((await this.storeAmbiguous(canonicalHome, logicalHome, snapshot)) || (await this.inUse(this.spellings(canonicalHome, name, logicalHome), snapshot))) {
                 throw new Error(`Could not verify that ${candidate.displayName} is inactive.`)
+            }
             return super.remove(candidate, callbacks)
         })
         if (!result) throw new Error(`Could not take the Vite+ installation lock at ${home}. The installer may be running.`)

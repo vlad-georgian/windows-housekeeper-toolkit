@@ -22,3 +22,5 @@ Unsupported, and refused rather than approximated:
 - A failed removal can leave a partly emptied release. It no longer verifies as a release, so it is not offered again.
 
 The default stays strict. Only a cleaner that has verified its own release layout sets the option, and it adds its own selection, fallback, running-process, and installer-lock checks. The Vite+ cleaner holds the installer's lock for the whole read-and-remove sequence. It pins the canonical store directory and the lock file the same way, takes the lock without waiting, and works only for Vite+ 1.7.0 and later, whose updater and rollback take that lock. Earlier releases roll back with no lock, so nothing can keep a rollback from swapping `current`, and the cleaner offers nothing for them.
+
+While it holds the lock, the cleaner also treats a running process or runtime command line that names the store's `current` link, by any spelling, as making the whole store ambiguous. A process started before an update keeps loading files from the old release while naming only the link, so nothing in that store is offered or removed until it exits.
