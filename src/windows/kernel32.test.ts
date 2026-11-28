@@ -3,6 +3,7 @@ import { lstat, readFile, readlink, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { entryIdentity, hasErrorCode, pathExists } from '../core/filesystem/paths.ts'
+import { errorMessage } from '../core/format.ts'
 import { createSandbox, type Sandbox } from '../test-support/fixtures.ts'
 import { rejection } from '../test-support/rejection.ts'
 import { moveExclusive, type ReparsePointKind, reparsePointKind } from './kernel32.ts'
@@ -51,6 +52,35 @@ describe('native file operations', () => {
         }
         expect(reparsePointKind(directory)).toBeNull()
         expect(reparsePointKind(file)).toBeNull()
+    })
+
+    test('refuses to move a folder over an existing file', async () => {
+        const from = await sandbox.directory('restored')
+        const to = await sandbox.file('original', 'written by the app')
+        const error = await rejection(moveExclusive(from, to))
+        expect(hasErrorCode(error, 'EEXIST')).toBe(true)
+        expect(errorMessage(error)).toMatch(/already exists \((80|183)\)/u)
+        expect(await readFile(to, 'utf8')).toBe('written by the app')
+        expect((await lstat(from)).isDirectory()).toBe(true)
+    })
+
+    test('reports the Windows reason when a move or lookup fails', async () => {
+        const missing = join(sandbox.root, 'missing')
+        const moveError = await rejection(moveExclusive(missing, join(sandbox.root, 'target')))
+        expect(hasErrorCode(moveError, 'ENOENT')).toBe(true)
+        expect(errorMessage(moveError)).toBe(`Could not move ${missing} to ${join(sandbox.root, 'target')}: not found (2).`)
+        const lookupError = await rejection(Promise.resolve().then(() => reparsePointKind(missing)))
+        expect(hasErrorCode(lookupError, 'ENOENT')).toBe(true)
+        expect(errorMessage(lookupError)).toContain('(2)')
+    })
+
+    test('accepts the same path spellings as node:fs', async () => {
+        const from = await sandbox.file('folder/source', 'data')
+        const unnormalized = `${sandbox.root}/folder/./other/../source`
+        expect(reparsePointKind(unnormalized)).toBeNull()
+        await moveExclusive(unnormalized, `${sandbox.root}/folder/moved`)
+        expect(await pathExists(from)).toBe(false)
+        expect(await readFile(join(sandbox.root, 'folder', 'moved'), 'utf8')).toBe('data')
     })
 
     test('refuses to replace an existing file symlink', async () => {
