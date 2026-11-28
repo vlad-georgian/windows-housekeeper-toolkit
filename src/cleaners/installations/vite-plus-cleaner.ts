@@ -209,7 +209,6 @@ export class VitePlusInstallationCleaner extends BaseCleaner {
         }
     }
 
-    /** Whether a running process is, or could be running from, the release. Unverifiable counts as in use. */
     /**
      * Whether a process names the store's `current` link, as itself or as its script. A runtime
      * started before an update keeps loading files lazily from the release it started in, yet names
@@ -223,6 +222,7 @@ export class VitePlusInstallationCleaner extends BaseCleaner {
         return links.some((link) => isPathInUse(link, paths) || isPathReferenced(link, commandLines))
     }
 
+    /** Whether a running process is, or could be running from, the release. Unverifiable counts as in use. */
     private async inUse(releases: readonly string[], snapshot: ProcessLister): Promise<boolean> {
         const paths = await runningProcessPaths(snapshot, vitePlusProcess)
         const commandLines = await runtimeCommandLines(snapshot, scriptRuntime)
