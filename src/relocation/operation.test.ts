@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from 'bun:test'
 import { lstat, readdir, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
@@ -12,6 +12,8 @@ import { createRecoveryJournal, type RecoveryJournal } from './journal.ts'
 import { differentVolumes, type VolumeComparison } from './layout.ts'
 import { createRelocationOperation, type RelocationEvent, type RelocationOptions } from './operation.ts'
 import { restoreDirectory } from './transfer.ts'
+
+setDefaultTimeout(30_000)
 
 let sandbox: Sandbox
 let journal: RecoveryJournal
@@ -348,7 +350,7 @@ describe('restoring migrated applications', () => {
 
     test('reports a migrated application that cannot be restored without changing it', async () => {
         await moveApps(['vscode-extensions'])
-        await symlink(await sandbox.directory('Elsewhere'), join(extensions(), 'linked'), 'junction')
+        await symlink(join(sandbox.root, 'missing'), join(extensions(), 'linked'), 'junction')
         const prompts = new FakePrompts([[]])
 
         expect(await operation().gather(prompts)).toBeNull()

@@ -1,6 +1,13 @@
 /** A per-user directory a relocatable app owns. */
 export interface RelocationPath {
     readonly path: string
+    /** Positive evidence for a redirected root outside the standard profile mirror. */
+    readonly verifyLegacyTarget?: (target: string) => Promise<boolean>
+    /** Verify an individually owned file in a shared location. */
+    readonly nativeLauncherRoot?: string
+    readonly linkedSelector?: { readonly owner: string; readonly entry: string; readonly selector: string }
+    readonly verifyFile?: (target: string) => Promise<boolean>
+    readonly kind?: 'directory' | 'file'
     /** What the directory holds, such as "installation" or "data". */
     readonly description: string
 }
@@ -14,5 +21,6 @@ export interface RelocatableApp {
     /** The process guard ID from `src/windows/processes.ts` used to detect the app in use. */
     readonly processGuardId: string
     readonly label: string
+    readonly preserveMirror?: boolean
     readonly paths: readonly RelocationPath[]
 }

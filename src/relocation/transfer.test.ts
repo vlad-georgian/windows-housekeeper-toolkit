@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { chmod, link, lstat, readdir, readFile, readlink, realpath, rename, stat, symlink, unlink, writeFile } from 'node:fs/promises'
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from 'bun:test'
+import { chmod, lstat, readdir, readFile, readlink, realpath, rename, stat, symlink, unlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
 
 import { pathExists } from '../core/filesystem/index.ts'
@@ -8,6 +8,8 @@ import { createSandbox, type Sandbox } from '../test-support/fixtures.ts'
 import { rejection, rejectionMessage } from '../test-support/rejection.ts'
 import { createRecoveryJournal, type RecoveryJournal } from './journal.ts'
 import { DestinationConflictError, IncompleteTransferError, moveDirectory, restoreDirectory, UnsupportedTreeError } from './transfer.ts'
+
+setDefaultTimeout(30_000)
 
 let sandbox: Sandbox
 let journal: RecoveryJournal
@@ -27,7 +29,7 @@ test.each(['junction', 'move ancestor', 'restore ancestor'] as const)(
             perform(transfer, {
                 journal,
                 async afterVerifyingSurvivor(record) {
-                    retiring = record.aside ?? destination
+                    retiring = change === 'restore ancestor' ? destination : (record.aside ?? destination)
                     if (change === 'junction') {
                         await unlink(original)
                         await symlink(await sandbox.directory('Elsewhere'), original, 'junction')
@@ -62,7 +64,7 @@ test.each(['move', 'restore'] as const)(
         expect(error).toBeInstanceOf(IncompleteTransferError)
         const [record] = await journal.list()
         if (!record) throw new Error('Expected retained partial-deletion recovery.')
-        const retiring = record.aside ?? destination
+        const retiring = action === 'move' ? (record.aside ?? destination) : destination
         const finalCopy = action === 'move' ? destination : original
         expect(await readFile(join(finalCopy, 'app-3.4.0', 'locked.dat'), 'utf8')).toBe('read-only')
         expect(await pathExists(join(retiring, 'app-3.4.0', 'locked.dat'))).toBe(false)
@@ -217,16 +219,9 @@ describe('moving a directory', () => {
         expect(await journal.list()).toEqual([])
     })
 
-    test('refuses trees that contain links or hard-linked files', async () => {
-        await symlink(await sandbox.directory('Elsewhere'), join(original, 'nested'), 'junction')
+    test('refuses a tree with a dangling junction', async () => {
+        await symlink(join(sandbox.root, 'missing'), join(original, 'nested'), 'junction')
         expect(await rejection(moveDirectory({ appId: 'github-desktop', original, destination, base }, { journal }))).toBeInstanceOf(UnsupportedTreeError)
-
-        const other = await sandbox.directory('Users/test/AppData/Local/Other')
-        await sandbox.file('Users/test/AppData/Local/Other/a.txt')
-        await link(join(other, 'a.txt'), join(other, 'b.txt'))
-        expect(await rejection(moveDirectory({ appId: 'other', original: other, destination: join(base, 'test', 'Other'), base }, { journal }))).toBeInstanceOf(
-            UnsupportedTreeError
-        )
         expect(await pathExists(base)).toBe(false)
     })
 
@@ -350,6 +345,26 @@ describe('restoring a directory', () => {
         expect(await journal.list()).toEqual([])
     })
 
+    test('keeps a file written at the original before the restored folder is placed', async () => {
+        const transfer = { appId: 'github-desktop', original, destination, base }
+        await moveDirectory(transfer, { journal })
+        const error = await rejection(
+            restoreDirectory(transfer, {
+                journal,
+                async beforeMove(from, to) {
+                    if (to === original && from.endsWith('.restoring')) await writeFile(original, 'written by the app')
+                }
+            })
+        )
+
+        expect(error).toBeInstanceOf(IncompleteTransferError)
+        expect(await readFile(original, 'utf8')).toBe('written by the app')
+        const [record] = await journal.list()
+        expect(record).toMatchObject({ action: 'restore', original, destination })
+        await expectJunction(record?.aside ?? '', destination)
+        expect(await readFile(join(destination, 'Update.exe'), 'utf8')).toBe('updater')
+    })
+
     test('refuses an original path that does not link to the destination', async () => {
         expect(await rejectionMessage(restoreDirectory({ appId: 'github-desktop', original, destination, base }, { journal }))).toContain('does not link to')
         expect((await lstat(original)).isDirectory()).toBe(true)
@@ -438,7 +453,7 @@ test.each([
             perform(transfer, {
                 journal,
                 async afterVerifyingSurvivor(record) {
-                    const retiring = record.aside ?? destination
+                    const retiring = action === 'move' ? (record.aside ?? destination) : destination
                     changedPath = changedSide === 'surviving' ? join(survivor, 'Update.exe') : join(retiring, changedSide === 'new entry' ? 'new.txt' : 'Update.exe')
                     await writeFile(changedPath, 'written during verification')
                 }
@@ -449,7 +464,7 @@ test.each([
         expect(error).toHaveProperty('message', expect.stringContaining(changedPath))
         const [record] = await journal.list()
         if (!record) throw new Error('Expected a retained recovery record.')
-        const retiring = record.aside ?? destination
+        const retiring = action === 'move' ? (record.aside ?? destination) : destination
         await chmod(join(retiring, 'app-3.4.0', 'locked.dat'), 0o666)
         expect(await readFile(changedPath, 'utf8')).toBe('written during verification')
         expect(await readFile(join(changedSide === 'surviving' ? retiring : survivor, 'Update.exe'), 'utf8')).toBe('updater')

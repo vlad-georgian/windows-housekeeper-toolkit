@@ -106,26 +106,29 @@ command to refresh the task's paths.
 
 ## Moving apps to another drive
 
-Choose **Move apps to another drive** in the launch menu to relocate GitHub
-Desktop's per-user installation and data, or VS Code's installed extensions.
+Choose **Move apps to another drive** in the launch menu for Codex, Claude Code,
+Claude Desktop, GitHub Desktop, or VS Code extensions. The catalog covers
+per-user installations and data. Windows manages the packaged app binaries.
 Migrated applications start checked. For newly checked apps, enter a
 base directory on another fixed local drive. Each path is mirrored under the base,
 your Windows profile name, and its profile-relative path, so
 `C:\Users\you\AppData\Local\GitHubDesktop` moves to
 `E:\Software\you\AppData\Local\GitHubDesktop` with a base of `E:\Software`.
-The original path becomes a directory junction, so the app keeps working.
+The app continues to use its original directory junction or file symbolic link.
+Creating file symbolic links requires Windows Developer Mode or link-creation privileges.
 
-The CLI compares copied files, read-only flags, and Windows owner, group,
-and discretionary access rules for every file and directory. It tests write
-access and verifies the junction. An ACL difference or an unreadable security
-descriptor stops the transfer. Clear a migrated application to restore its
-latest files to the original paths. Both operations verify the surviving copy
-at its final path before removing the old copy. Restore keeps empty parents.
+The CLI compares copied files, read-only flags, Windows owner, group, and
+discretionary access rules. It tests write access and verifies the link before
+releasing an owned copy. Clear a migrated application to restore its latest
+files. Codex and Claude keep recorded destination names usable through links
+after restoration. A backing store without a matching ownership record stays
+in place, and empty parent folders are kept.
 
-Reclamation opens every validated entry in both trees with Windows handles
-that deny write and delete sharing, then checks identities, permissions,
-directory membership, and file hashes again. It deletes only the validated
-old entries through those handles. An open writer or a verification failure
+Reclamation uses Windows handles to check the identity, permissions, contents,
+and membership of both copies. It opens junctions and file symlinks without
+following their targets. For hard-linked files, it denies writes throughout
+the operation, verifies the alias names, and deletes only the selected old
+names through individual handles. An open writer or a verification failure
 keeps the recovery record. A new old-tree entry is left in place and prevents
 its parent from being removed. Unsupported handle deletion or an error during
 deletion can leave a partially reclaimed old tree beside the verified copy.
@@ -142,7 +145,7 @@ the apps before applying, or they are skipped. If a transfer leaves a recovery
 record, the CLI holds back that application and points to
 `%LOCALAPPDATA%\windows-housekeeper-toolkit\relocation-recovery.json`.
 
-An existing junction is eligible for restore when its stored target resolves
+An existing link is eligible for restore when its stored target resolves
 directly to the mirrored location on another fixed local volume. An app with
 configured data outside the Windows profile is skipped individually.
 
@@ -151,7 +154,9 @@ configured data outside the Windows profile is skipped individually.
 1. Close the affected app and its background processes. Back up the journal,
    find the reported record ID, and preserve the data at its `original`,
    `destination`, `staging`, and `aside` paths. A phase tells you where the
-   operation stopped. Verify each copy and junction before moving any files.
+   operation stopped. The `originalLink` record holds its payload, target and
+   identities. Preserve the physical copy at `backingAside` and the link at
+   `forwardingAside` when present. Verify each copy and link before moving files.
 2. Use the recorded phase to identify the copy to verify.
 
     For `copying`, the original move source or restore destination is still
@@ -162,8 +167,8 @@ configured data outside the Windows profile is skipped individually.
     verified copy, keeping the other copies for comparison.
 
     For `reclaiming`, verify the full contents and permissions of `destination`.
-    If the junction at `original` is missing, verify its ancestors before
-    recreating the junction to the verified destination. For `releasing`, verify
+    If the link at `original` is missing, verify its ancestors before
+    recreating the junction or file symlink to the verified destination. For `releasing`, verify
     the full contents and permissions of the restored copy at `original`. The
     retiring `aside` or destination may already be partly deleted. Preserve
     its remainder, compare it with the final copy, and recover any newer or

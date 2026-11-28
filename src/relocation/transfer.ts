@@ -1,23 +1,31 @@
 import { randomUUID } from 'node:crypto'
 import type { Stats } from 'node:fs'
-import { lstat, readdir, realpath, rename, rmdir, statfs, symlink, unlink } from 'node:fs/promises'
+import { link, lstat, readlink, realpath, rmdir, statfs, symlink } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 import { canonicalPathKey, isPathInside } from '../core/filesystem/index.ts'
 import { entryIdentity, hasErrorCode } from '../core/filesystem/paths.ts'
 import { errorMessage, formatBytes } from '../core/format.ts'
-import {
-    createDestinationParents,
-    type DirectoryIdentity,
-    inspectDestinationPath,
-    inspectDirectoryPath,
-    readDirectoryIdentity,
-    requireDirectoryIdentity,
-    storedLinkTarget
-} from './directory-path.ts'
+import { moveExclusive } from '../windows/kernel32.ts'
+import type { ReclamationEntry, ReclamationGuard } from '../windows/reclaim-tree.ts'
+import { createDestinationParents, inspectDestinationPath, inspectDirectoryPath, type DirectoryIdentity, requireDirectoryIdentity, storedLinkTarget } from './directory-path.ts'
+import type { OriginalLink } from './inspect.ts'
 import type { RecoveryJournal, RecoveryRecord, TransferPhase } from './journal.ts'
 import { nearestExistingPath } from './layout.ts'
-import { copyTree, removeTree, removeVerifiedTree, snapshotTree, type TreeManifest, verifyTree, verifyTreeContents } from './tree.ts'
+import {
+    type CopiedFiles,
+    registerCopies,
+    remapExternalLinks,
+    copyTree,
+    reclaimPublishedAlias,
+    reclaimRelocationLinks,
+    removeTree,
+    snapshotRelocationLink,
+    snapshotTree,
+    type TreeManifest,
+    verifyTree,
+    verifyTreeContents
+} from './tree.ts'
 
 export { UnsupportedTreeError } from './tree.ts'
 
@@ -25,21 +33,31 @@ export { UnsupportedTreeError } from './tree.ts'
 export interface DirectoryTransfer {
     readonly appId: string
     readonly original: string
+    readonly originalLink?: OriginalLink
+    readonly forwarding?: OriginalLink
+    readonly expectedIdentity?: string
+    readonly kind?: 'directory' | 'file'
     readonly destination: string
     /** The relocation base bounds cleanup of newly created folders when a move is undone. */
     readonly base: string
 }
 
 export interface TransferOptions {
-    readonly journal: RecoveryJournal
-    /** Existing destination directories captured before showing the combined plan. */
     readonly destinationDirectories?: readonly DirectoryIdentity[]
+    readonly copiedFiles?: CopiedFiles
+    readonly linkTargets?: ReadonlyMap<string, { from: string; to: string }>
+    readonly recordAliases?: (aliases: CopiedFiles) => Promise<void>
+    readonly preserveMirror?: boolean
+    readonly trackRootAlias?: boolean
+    /** Removes the staging alias after an exclusive file publication. */
+    readonly removeStagingAlias?: (path: string) => Promise<void>
+    readonly journal: RecoveryJournal
     /** Runs after each phase's recovery record is saved. Tests throw here to simulate an interruption. */
-    readonly beforePhase?: (phase: TransferPhase) => void | Promise<void>
-    /** Runs inside survivor verification before the final guarded reclamation. */
     readonly afterVerifyingSurvivor?: (record: RecoveryRecord) => void | Promise<void>
-    /** Fixture fault injection after this many successful retiring-entry deletions. */
     readonly failReclamationAfter?: number
+    readonly beforePhase?: (phase: TransferPhase) => void | Promise<void>
+    /** Runs just before each set-aside or rollback move. Tests occupy the target here to simulate a racing writer. */
+    readonly beforeMove?: (from: string, to: string) => void | Promise<void>
 }
 
 export interface TransferResult {
@@ -70,7 +88,7 @@ async function lstatIfPresent(path: string): Promise<Stats | null> {
     }
 }
 
-/** Whether `path` names and resolves directly to the expected directory. */
+/** Whether `path` is a link that resolves to the directory at `target`. */
 export async function linksTo(path: string, target: string): Promise<boolean> {
     const stats = await lstatIfPresent(path)
     if (!stats?.isSymbolicLink()) return false
@@ -95,11 +113,34 @@ async function requireCapacity(path: string, bytes: number): Promise<void> {
     }
 }
 
-async function verifyJunction(original: string, destination: string): Promise<void> {
-    const [linked, real] = await Promise.all([readdir(original), readdir(destination)])
-    if (!(await linksTo(original, destination)) || linked.toSorted().join('\n') !== real.toSorted().join('\n')) {
-        throw new Error(`The junction at ${original} does not resolve to ${destination}.`)
+async function requirePlainParent(path: string): Promise<void> {
+    const parent = await nearestExistingPath(dirname(path))
+    if (canonicalPathKey(await realpath(parent)) !== canonicalPathKey(parent)) throw new Error(`${path} has a linked parent.`)
+}
+
+async function objectIdentity(path: string): Promise<string> {
+    return entryIdentity(await lstat(path, { bigint: true }))
+}
+
+async function verifyOriginalLink(path: string, expected: OriginalLink): Promise<void> {
+    await requirePlainParent(path)
+    if (
+        (await objectIdentity(path)) !== expected.identity ||
+        (await readlink(path)) !== expected.payload ||
+        (expected.indirect ? canonicalPathKey(await realpath(path)) !== canonicalPathKey(expected.target) : !(await linksTo(path, expected.target))) ||
+        (await objectIdentity(expected.target)) !== expected.targetIdentity ||
+        canonicalPathKey(await realpath(expected.target)) !== canonicalPathKey(expected.target)
+    ) {
+        throw new Error(`The original link or its target changed at ${path}.`)
     }
+}
+
+async function placeCopy(options: TransferOptions, staging: string, destination: string, file: boolean): Promise<void> {
+    // rename can replace a racing file even when the source is a folder. Both publications are exclusive.
+    if (file) {
+        await requireAbsent(destination)
+        await link(staging, destination)
+    } else await moveEntry(options, staging, destination)
 }
 
 /** Removes empty destination parents created by the current move, stopping below the base. */
@@ -124,10 +165,11 @@ function newRecord(action: RecoveryRecord['action'], transfer: DirectoryTransfer
         id,
         appId: transfer.appId,
         action,
+        ...(transfer.originalLink && { originalLink: transfer.originalLink }),
         original: transfer.original,
         destination: transfer.destination,
         staging: action === 'move' ? `${transfer.destination}${tag}.partial` : `${transfer.original}${tag}.restoring`,
-        aside: action === 'move' ? `${transfer.original}${tag}.moved` : null,
+        aside: `${transfer.original}${tag}.aside`,
         createdParent: null,
         phase: 'copying',
         startedAt: new Date().toISOString()
@@ -154,251 +196,371 @@ function phaseTracker(
     }
 }
 
-interface MoveProgress {
-    readonly createdParents: DirectoryIdentity[]
-    destinationParents: readonly DirectoryIdentity[]
-    stagingIdentity?: string | null
-    placed: boolean
-    renamedOriginal: boolean
-    junctionIdentity?: string
+/** The captured ancestry of the original, source and destination, rechecked before each step. */
+interface TransferPaths {
+    /** Destination parents created by this move, for rollback. */
+    readonly created: DirectoryIdentity[]
+    recheck(): Promise<void>
+    recheckForSurvivor(): Promise<void>
+    createDestinationParents(onCreated: (path: string) => Promise<void>): Promise<void>
+    parents(): readonly DirectoryIdentity[]
 }
 
-async function undoMove(
-    transfer: DirectoryTransfer,
-    record: RecoveryRecord,
-    progress: MoveProgress,
-    manifest: TreeManifest,
-    originalDirectories: readonly DirectoryIdentity[]
-): Promise<void> {
+async function captureTransferPaths(transfer: DirectoryTransfer, moving: boolean, source: string, known: TransferOptions['destinationDirectories']): Promise<TransferPaths> {
     const { original, destination, base } = transfer
-    const { aside, staging } = record
-    if (progress.renamedOriginal && aside !== null) {
-        await inspectDirectoryPath(dirname(original), originalDirectories.slice(0, -1))
-        const source = originalDirectories.at(-1)
-        if (!source) throw new Error(`The identity of ${original} could not be verified.`)
-        await requireDirectoryIdentity(aside, source.identity)
-        if (progress.junctionIdentity !== undefined) {
-            const junction = await lstat(original, { bigint: true })
-            if (!junction.isSymbolicLink() || entryIdentity(junction) !== progress.junctionIdentity) throw new Error(`The junction at ${original} changed.`)
-            await unlink(original)
-        }
-        if (await lstatIfPresent(original)) throw new Error(`Both ${original} and ${aside} exist.`)
-        await rename(aside, original)
+    const destinationAction = !moving && transfer.kind !== 'file' ? 'restore' : 'move'
+    const originalParents = await inspectDirectoryPath(dirname(original))
+    let directories = await inspectDestinationPath(base, destination, destinationAction, known)
+    const sourceParents = await inspectDirectoryPath(dirname(source))
+    const created: DirectoryIdentity[] = []
+    return {
+        created,
+        async recheck() {
+            await inspectDirectoryPath(dirname(original), originalParents)
+            await inspectDestinationPath(base, destination, destinationAction, directories)
+            await inspectDirectoryPath(dirname(source), sourceParents)
+        },
+        async recheckForSurvivor() {
+            await inspectDirectoryPath(dirname(original), originalParents)
+            if (moving) await inspectDestinationPath(base, destination, 'move', directories)
+        },
+        async createDestinationParents(onCreated) {
+            directories = await createDestinationParents(dirname(destination), directories, created)
+            if (created[0]) await onCreated(created[0].path)
+        },
+        parents: () => [...originalParents, ...directories.filter((directory) => canonicalPathKey(directory.path) !== canonicalPathKey(destination)), ...sourceParents]
     }
-    const identity = progress.stagingIdentity
-    if (identity !== undefined) {
-        if (identity === null) throw new Error(`The identity of ${staging} could not be verified.`)
-        await inspectDestinationPath(base, destination, 'move', progress.destinationParents)
-        if (progress.placed) await removeTree(destination, manifest, identity)
-        else {
-            await requireDirectoryIdentity(staging, identity)
-            await removeVerifiedTree(staging)
-        }
-    }
-    await pruneEmptyParents(progress.createdParents, base)
 }
 
-/**
- * Moves a plain directory to its mirrored destination and leaves a verified junction at the
- * original path. The copy is verified, including permissions, before source space is reclaimed.
- * An interruption before the junction is verified is undone; afterwards the recovery record is kept.
- */
-export async function moveDirectory(transfer: DirectoryTransfer, options: TransferOptions): Promise<TransferResult> {
-    const { original, destination, base } = transfer
-    const originalDirectories = await inspectDirectoryPath(original)
-    const source = originalDirectories.at(-1)
-    if (!source || canonicalPathKey(source.path) !== canonicalPathKey(original)) throw new Error(`${original} is not a plain directory.`)
-    const destinationParents = await inspectDestinationPath(base, destination, 'move', options.destinationDirectories)
-    await requireAbsent(destination)
-    const manifest = await snapshotTree(original)
-    const tracker = phaseTracker(newRecord('move', transfer), options)
-    const { staging, aside, id } = tracker.record()
-    if (!aside) throw new Error('A move needs a path for the original directory.')
+/** Paths, snapshots and recovery names a transfer works from, all checked before anything changes. */
+interface TransferPlan {
+    readonly transfer: DirectoryTransfer
+    readonly options: TransferOptions
+    readonly moving: boolean
+    readonly source: string
+    readonly finalRoot: string
+    readonly file: boolean
+    readonly linkKind: 'junction' | 'symlink'
+    readonly manifest: TreeManifest
+    readonly output: TreeManifest
+    readonly originalLink: OriginalLink | undefined
+    readonly originalDescriptor: ReclamationEntry | undefined
+    readonly forwardingDescriptor: ReclamationEntry | undefined
+    readonly liveIdentity: string
+    readonly ownsBacking: boolean
+    readonly tracker: ReturnType<typeof phaseTracker>
+    readonly staging: string
+    readonly aside: string
+    readonly paths: TransferPaths
+}
+
+/** What the swap has changed so far. Undo reverses exactly these steps. */
+interface SwapProgress {
+    copy?: TreeManifest
+    published: boolean
+    forwardingMoved: boolean
+    setAside: boolean
+    replacementId?: string
+    replacement?: ReclamationEntry
+}
+
+async function prepareTransfer(action: 'move' | 'restore', transfer: DirectoryTransfer, options: TransferOptions): Promise<TransferPlan> {
+    const { original, destination } = transfer
+    const moving = action === 'move'
+    const source = moving ? (transfer.originalLink?.target ?? original) : destination
+    const finalRoot = moving ? destination : original
+    const paths = await captureTransferPaths(transfer, moving, source, options.destinationDirectories)
+    if (isPathInside(destination, source) || isPathInside(source, destination) || (moving && canonicalPathKey(source) === canonicalPathKey(destination))) {
+        throw new Error(`The source and destination overlap at ${source}.`)
+    }
+    if (moving && transfer.forwarding) await verifyOriginalLink(destination, transfer.forwarding)
+    else if (moving) await requireAbsent(destination)
+    else if (!(await linksTo(original, destination))) throw new Error(`${original} does not link to ${destination}.`)
+
+    const manifest = await snapshotTree(source)
+    const output = remapExternalLinks(manifest, options.linkTargets)
+    const file = manifest.entries[0]?.kind === 'file'
+    if (file !== (transfer.kind === 'file')) throw new Error(`${source} is not the expected type.`)
+    const originalLink =
+        transfer.originalLink ??
+        (moving
+            ? undefined
+            : {
+                  target: destination,
+                  payload: await readlink(original),
+                  identity: await objectIdentity(original),
+                  targetIdentity: await objectIdentity(destination)
+              })
+    if (originalLink) await verifyOriginalLink(original, originalLink)
+    const linkKind = file ? 'symlink' : 'junction'
+    const originalDescriptor = originalLink && (await snapshotRelocationLink(original, originalLink.identity, { kind: linkKind, payload: originalLink.payload }))
+    const forwardingDescriptor =
+        transfer.forwarding && (await snapshotRelocationLink(destination, transfer.forwarding.identity, { kind: linkKind, payload: transfer.forwarding.payload }))
+    const liveIdentity = await objectIdentity(original)
+    if (transfer.expectedIdentity && liveIdentity !== transfer.expectedIdentity) throw new Error(`${original} changed since the plan was confirmed.`)
+    const owner = originalLink && (await options.journal.owner(original))
+    const ownsBacking =
+        !!owner &&
+        !!originalLink &&
+        !originalLink.indirect &&
+        canonicalPathKey(owner.path) === canonicalPathKey(originalLink.target) &&
+        owner.identity === originalLink.targetIdentity
+    const record = newRecord(action, { ...transfer, ...(originalLink && { originalLink }) })
+    const backingAside = ownsBacking && (moving || options.preserveMirror) ? `${source}.windows-housekeeper-toolkit-${record.id}.aside` : undefined
+    if (backingAside) await requireAbsent(backingAside)
+    const forwardingAside = transfer.forwarding ? `${destination}.windows-housekeeper-toolkit-${record.id}.forwarding` : undefined
+    if (forwardingAside) await requireAbsent(forwardingAside)
+    const tracker = phaseTracker({ ...record, ...(forwardingAside && { forwardingAside }), ...(backingAside && { backingAside }) }, options)
+    const { staging, aside } = tracker.record()
+    if (!aside) throw new Error('A transfer requires a set-aside path.')
     await requireAbsent(staging)
     await requireAbsent(aside)
-    await requireCapacity(dirname(destination), manifest.bytes)
-
-    const progress: MoveProgress = { createdParents: [], destinationParents, placed: false, renamedOriginal: false }
-    try {
-        await tracker.enter('copying')
-        progress.destinationParents = await createDestinationParents(dirname(destination), destinationParents, progress.createdParents)
-        if (progress.createdParents[0]) await tracker.update({ createdParent: progress.createdParents[0].path })
-        await inspectDestinationPath(base, destination, 'move', progress.destinationParents)
-        await requireAbsent(destination)
-        await inspectDirectoryPath(original, originalDirectories)
-        await copyTree(original, staging, async () => {
-            progress.stagingIdentity = null
-            progress.stagingIdentity = (await readDirectoryIdentity(staging)).identity
-        })
-        await verifyTree(staging, manifest)
-        const stagedIdentity = progress.stagingIdentity
-        if (!stagedIdentity) throw new Error(`The identity of ${staging} could not be verified.`)
-
-        await tracker.enter('swapping')
-        await inspectDestinationPath(base, destination, 'move', progress.destinationParents)
-        await requireAbsent(destination)
-        await requireDirectoryIdentity(staging, stagedIdentity)
-        await rename(staging, destination)
-        progress.placed = true
-        await requireDirectoryIdentity(destination, stagedIdentity)
-        await inspectDirectoryPath(original, originalDirectories)
-        await requireAbsent(aside)
-        await rename(original, aside)
-        progress.renamedOriginal = true
-        // Detect writes that happened while copying.
-        await verifyTreeContents(aside, manifest)
-        await symlink(destination, original, 'junction')
-        progress.junctionIdentity = entryIdentity(await lstat(original, { bigint: true }))
-        await verifyJunction(original, destination)
-    } catch (error) {
-        try {
-            await undoMove(transfer, tracker.record(), progress, manifest, originalDirectories)
-        } catch (undoError) {
-            throw new IncompleteTransferError(
-                `Moving ${original} failed (${errorMessage(error)}) and could not be undone (${errorMessage(undoError)}). Recovery details are in ${options.journal.location}.`,
-                tracker.record(),
-                { cause: error }
-            )
-        }
-        await options.journal.remove(id)
-        throw error
+    await requireCapacity(dirname(finalRoot), manifest.bytes)
+    return {
+        transfer,
+        options,
+        moving,
+        source,
+        finalRoot,
+        file,
+        linkKind,
+        manifest,
+        output,
+        originalLink,
+        originalDescriptor,
+        forwardingDescriptor,
+        liveIdentity,
+        ownsBacking,
+        tracker,
+        staging,
+        aside,
+        paths
     }
-
-    try {
-        await tracker.enter('reclaiming')
-        const stagedIdentity = progress.stagingIdentity
-        if (!stagedIdentity) throw new Error(`The identity of ${destination} could not be verified.`)
-        await inspectDirectoryPath(dirname(original), originalDirectories.slice(0, -1))
-        await removeTree(
-            aside,
-            manifest,
-            source.identity,
-            async () => {
-                await inspectDestinationPath(base, destination, 'move', progress.destinationParents)
-                await requireDirectoryIdentity(destination, stagedIdentity)
-                await verifyTree(destination, manifest)
-                await requireDirectoryIdentity(destination, stagedIdentity)
-                await verifyJunction(original, destination)
-                await options.afterVerifyingSurvivor?.(tracker.record())
-            },
-            { path: destination, identity: stagedIdentity },
-            {
-                guards: [
-                    ...originalDirectories.slice(0, -1),
-                    ...progress.destinationParents,
-                    { path: original, identity: progress.junctionIdentity ?? '', junctionTarget: destination }
-                ],
-                failAfter: options.failReclamationAfter
-            }
-        )
-    } catch (error) {
-        throw new IncompleteTransferError(
-            `The move of ${original} could not safely reclaim its old copy at ${aside} (${errorMessage(error)}). Recovery details are in ${options.journal.location}.`,
-            tracker.record(),
-            { cause: error }
-        )
-    }
-    await options.journal.remove(id)
-    return { bytes: manifest.bytes, files: manifest.files }
 }
 
-/**
- * Restores the latest contents of a relocated directory to its original path, replacing the
- * junction. The restored copy is verified before destination space is released. Parent
- * directories are kept because their ownership is unknown after a completed move.
- */
-export async function restoreDirectory(transfer: DirectoryTransfer, options: TransferOptions): Promise<TransferResult> {
-    const { original, destination, base } = transfer
-    const originalParents = await inspectDirectoryPath(dirname(original))
-    if (!(await linksTo(original, destination))) throw new Error(`${original} does not link to ${destination}.`)
-    const originalJunction = entryIdentity(await lstat(original, { bigint: true }))
-    const destinationDirectories = await inspectDestinationPath(base, destination, 'restore', options.destinationDirectories)
-    const relocated = destinationDirectories.at(-1)
-    if (!relocated || canonicalPathKey(relocated.path) !== canonicalPathKey(destination)) throw new Error(`${destination} is not a plain directory.`)
-    const manifest = await snapshotTree(destination)
-    const tracker = phaseTracker(newRecord('restore', transfer), options)
-    const { staging, id } = tracker.record()
-    await requireAbsent(staging)
-    await requireCapacity(dirname(original), manifest.bytes)
-
-    let stagingIdentity: string | null | undefined
-    let removedJunction = false
+/** `rename` would replace a file that appeared at `to`; this fails closed instead. */
+async function moveEntry(options: TransferOptions, from: string, to: string): Promise<void> {
+    await options.beforeMove?.(from, to)
     try {
-        await tracker.enter('copying')
-        await inspectDestinationPath(base, destination, 'restore', destinationDirectories)
-        await inspectDirectoryPath(dirname(original), originalParents)
-        await copyTree(destination, staging, async () => {
-            stagingIdentity = null
-            stagingIdentity = (await readDirectoryIdentity(staging)).identity
-        })
-        await verifyTree(staging, manifest)
+        await moveExclusive(from, to)
+    } catch (error) {
+        if (hasErrorCode(error, 'EEXIST')) throw new DestinationConflictError(`${to} already exists. Move or remove it, then try again.`, { cause: error })
+        throw error
+    }
+}
 
-        await tracker.enter('swapping')
-        await inspectDestinationPath(base, destination, 'restore', destinationDirectories)
-        await inspectDirectoryPath(dirname(original), originalParents)
-        if (!stagingIdentity) throw new Error(`The identity of ${staging} could not be verified.`)
-        await requireDirectoryIdentity(staging, stagingIdentity)
-        const junction = await lstat(original, { bigint: true })
-        if (entryIdentity(junction) !== originalJunction || !(await linksTo(original, destination))) throw new Error(`${original} no longer links to ${destination}.`)
-        await unlink(original)
-        removedJunction = true
-        // Detect writes that happened while copying.
-        await verifyTreeContents(destination, manifest)
-        await inspectDirectoryPath(dirname(original), originalParents)
-        await requireDirectoryIdentity(staging, stagingIdentity)
-        await requireAbsent(original)
-        await rename(staging, original)
+async function removeStagingAlias(plan: TransferPlan, staged: TreeManifest): Promise<void> {
+    if (plan.options.removeStagingAlias) await plan.options.removeStagingAlias(plan.staging)
+    else await reclaimPublishedAlias(plan.staging, plan.finalRoot, staged, plan.paths.parents())
+}
+
+/** Copy and verify in staging, then swap the copy into place, recording each step in `progress`. */
+async function swapIntoPlace(plan: TransferPlan, progress: SwapProgress): Promise<void> {
+    const { transfer, options, moving, source, finalRoot, file, linkKind, manifest, output, originalLink, liveIdentity, tracker, staging, aside, paths } = plan
+    const { original, destination } = transfer
+    const { forwardingAside } = tracker.record()
+    await paths.recheck()
+    if (moving) {
+        await paths.createDestinationParents((createdParent) => tracker.update({ createdParent }))
+        if (!transfer.forwarding) await requireAbsent(destination)
+    }
+    await paths.recheck()
+    const stagedId = await copyTree(source, staging, output, finalRoot, options.copiedFiles)
+    const copy = await verifyTree(staging, output, finalRoot)
+    if (copy.entries[0]?.identity !== stagedId) throw new Error(`${staging} changed during the copy.`)
+    progress.copy = copy
+
+    await tracker.enter('swapping')
+    await paths.recheck()
+    if (originalLink) await verifyOriginalLink(original, originalLink)
+    if ((await objectIdentity(original)) !== liveIdentity) throw new Error(`${original} changed during relocation.`)
+    await verifyTreeContents(source, manifest, source, true)
+    await verifyTreeContents(staging, copy, finalRoot, true)
+    if (moving) {
+        if (forwardingAside && transfer.forwarding) {
+            await verifyOriginalLink(destination, transfer.forwarding)
+            await moveEntry(options, destination, forwardingAside)
+            progress.forwardingMoved = true
+        }
+        await placeCopy(options, staging, destination, file)
+        progress.published = true
+        if (file) await removeStagingAlias(plan, copy)
+    }
+    await moveEntry(options, original, aside)
+    progress.setAside = true
+    if ((await objectIdentity(aside)) !== liveIdentity) throw new Error(`${aside} changed during the swap.`)
+    if (moving) {
+        await symlink(destination, original, file ? 'file' : 'junction')
+        progress.replacementId = await objectIdentity(original)
+        progress.replacement = await snapshotRelocationLink(original, progress.replacementId, { kind: linkKind, payload: destination })
+        if (!(await linksTo(original, destination))) throw new Error(`Could not verify the replacement link at ${original}.`)
+    } else {
+        await placeCopy(options, staging, original, file)
+        progress.published = true
+        if (file) await removeStagingAlias(plan, copy)
+    }
+    await verifyTree(finalRoot, output, finalRoot)
+}
+
+/** Reverse the recorded swap steps, newest first, verifying each object before touching it. */
+async function undoSwap(plan: TransferPlan, progress: SwapProgress, error: unknown): Promise<void> {
+    const { transfer, options, moving, liveIdentity, tracker, staging, aside, paths } = plan
+    const { original, destination } = transfer
+    const { forwardingAside } = tracker.record()
+    const { copy, replacementId, replacement } = progress
+    await paths.recheck()
+    if (moving && replacementId !== undefined) {
+        if ((await objectIdentity(original)) !== replacementId || !(await linksTo(original, destination))) throw new Error(`${original} changed.`, { cause: error })
+        if (!replacement) throw new Error(`Could not verify the replacement at ${original}.`, { cause: error })
+        await reclaimRelocationLinks([replacement], paths.parents())
+    }
+    if (progress.published && !moving && copy) await removeTree(original, copy, copy.entries[0]?.identity, undefined, undefined, { guards: paths.parents() })
+    if (progress.setAside) {
+        if ((await objectIdentity(aside)) !== liveIdentity) throw new Error(`${aside} changed.`, { cause: error })
+        await moveEntry(options, aside, original)
+    }
+    if (progress.published && moving && copy) await removeTree(destination, copy, copy.entries[0]?.identity, undefined, undefined, { guards: paths.parents() })
+    if (progress.forwardingMoved && forwardingAside && transfer.forwarding) {
+        if ((await objectIdentity(forwardingAside)) !== transfer.forwarding.identity) throw new Error(`${forwardingAside} changed.`, { cause: error })
+        await moveEntry(options, forwardingAside, destination)
+    }
+    if (await lstatIfPresent(staging)) {
+        if (!copy) throw new Error(`Keep the partial copy at ${staging} for inspection.`, { cause: error })
+        await removeTree(staging, copy, copy.entries[0]?.identity, undefined, undefined, { guards: paths.parents() })
+    }
+    await pruneEmptyParents(paths.created, transfer.base)
+}
+
+/** Release the retired copy and links under held handles, then record who owns the mirror. */
+async function reclaimRetired(plan: TransferPlan, progress: SwapProgress): Promise<TransferResult> {
+    const {
+        transfer,
+        options,
+        moving,
+        source,
+        finalRoot,
+        file,
+        linkKind,
+        manifest,
+        originalLink,
+        originalDescriptor,
+        forwardingDescriptor,
+        liveIdentity,
+        ownsBacking,
+        tracker,
+        aside,
+        paths
+    } = plan
+    const { original, destination } = transfer
+    const { forwardingAside, backingAside } = tracker.record()
+    const { copy, replacementId } = progress
+    const verifiedIdentity = copy?.entries[0]?.identity
+    if (!copy || !verifiedIdentity) throw new Error(`Missing verified copy at ${finalRoot}.`)
+    const requireReplacementLink = async () => {
+        if (moving && ((await objectIdentity(original)) !== replacementId || !(await linksTo(original, destination)))) throw new Error(`${original} changed before reclamation.`)
+    }
+    const verifySurvivor = async () => {
+        await paths.recheckForSurvivor()
+        const current = await verifyTree(finalRoot, copy, finalRoot)
+        if (current.entries[0]?.identity !== verifiedIdentity || (await objectIdentity(finalRoot)) !== verifiedIdentity) throw new Error(`${finalRoot} changed during reclamation.`)
+        await requireReplacementLink()
+        await options.afterVerifyingSurvivor?.(tracker.record())
+    }
+
+    await tracker.enter(moving ? 'reclaiming' : 'releasing')
+    await paths.recheck()
+    await verifyTreeContents(finalRoot, copy, finalRoot, true)
+    await requireReplacementLink()
+    if ((await objectIdentity(aside)) !== liveIdentity) throw new Error(`${aside} changed before reclamation.`)
+    let forwardingIdentity: string | undefined
+    const guards: ReclamationGuard[] = [...paths.parents()]
+    if (moving && replacementId) guards.push({ path: original, identity: replacementId, link: { kind: linkKind, payload: destination } })
+    const retiringLinks: ReclamationEntry[] = []
+    if (progress.forwardingMoved && forwardingAside && forwardingDescriptor) retiringLinks.push({ ...forwardingDescriptor, path: forwardingAside })
+    let retiringTree: string | undefined = aside
+    if (originalLink && originalDescriptor) {
+        await verifyOriginalLink(aside, originalLink)
+        await verifyTreeContents(source, manifest, source, true)
+        retiringLinks.push({ ...originalDescriptor, path: aside })
+        retiringTree = undefined
+        if (backingAside) {
+            // Preserve the previous mirror name for consumers after its backing copy is released.
+            await moveEntry(options, source, backingAside)
+            await symlink(original, source, file ? 'file' : 'junction')
+            forwardingIdentity = await objectIdentity(source)
+            if (canonicalPathKey(await storedLinkTarget(source)) !== canonicalPathKey(original) || canonicalPathKey(await realpath(source)) !== canonicalPathKey(finalRoot))
+                throw new Error(`Could not verify the forwarding link at ${source}.`)
+            guards.push({ path: source, identity: forwardingIdentity, link: { kind: linkKind, payload: original } })
+            retiringTree = backingAside
+        } else if (!moving && ownsBacking) retiringTree = destination
+    }
+    if (retiringTree) {
+        await removeTree(
+            retiringTree,
+            manifest,
+            manifest.entries[0]?.identity,
+            verifySurvivor,
+            { path: finalRoot, identity: verifiedIdentity },
+            { guards, links: retiringLinks, failAfter: options.failReclamationAfter, survivorManifest: copy }
+        )
+    } else {
+        await reclaimRelocationLinks(retiringLinks, guards, { path: finalRoot, manifest: copy }, verifySurvivor)
+    }
+    if ((await objectIdentity(finalRoot)) !== verifiedIdentity) throw new Error(`${finalRoot} changed during reclamation.`)
+    await options.journal.setOwner(
+        original,
+        moving ? { path: destination, identity: verifiedIdentity } : forwardingIdentity ? { path: destination, identity: forwardingIdentity, forwarding: true } : null
+    )
+    if ((await objectIdentity(finalRoot)) !== verifiedIdentity) throw new Error(`${finalRoot} changed while recording ownership.`)
+    if (!options.copiedFiles) return { files: manifest.files, bytes: manifest.bytes }
+    const result = registerCopies(manifest, copy, finalRoot, options.copiedFiles, options.trackRootAlias)
+    await options.recordAliases?.(options.copiedFiles)
+    return result
+}
+
+/** Move or restore one verified filesystem object. Renaming the live entry aside preserves
+ * the exact junction, file symlink or hard-link name for rollback until the swap is verified. */
+async function transferPath(action: 'move' | 'restore', transfer: DirectoryTransfer, options: TransferOptions): Promise<TransferResult> {
+    const plan = await prepareTransfer(action, transfer, options)
+    const { id } = plan.tracker.record()
+    await plan.tracker.enter('copying').catch(async (error) => {
+        await options.journal.remove(id)
+        throw error
+    })
+    const progress: SwapProgress = { published: false, forwardingMoved: false, setAside: false }
+    try {
+        await swapIntoPlace(plan, progress)
     } catch (error) {
         try {
-            if (removedJunction || stagingIdentity !== undefined) await inspectDirectoryPath(dirname(original), originalParents)
-            if (removedJunction) {
-                await inspectDestinationPath(base, destination, 'restore', destinationDirectories)
-                await requireAbsent(original)
-                await symlink(destination, original, 'junction')
-                await verifyJunction(original, destination)
-            }
-            if (stagingIdentity !== undefined) {
-                if (stagingIdentity === null) throw new Error(`The identity of ${staging} could not be verified.`, { cause: error })
-                await requireDirectoryIdentity(staging, stagingIdentity)
-                await removeVerifiedTree(staging)
-            }
+            await undoSwap(plan, progress, error)
         } catch (undoError) {
             throw new IncompleteTransferError(
-                `Restoring ${original} failed (${errorMessage(error)}) and could not be undone (${errorMessage(undoError)}). Recovery details are in ${options.journal.location}.`,
-                tracker.record(),
+                `${action} of ${transfer.original} failed (${errorMessage(error)}). Recovery details are in ${options.journal.location}: ${errorMessage(undoError)}`,
+                plan.tracker.record(),
                 { cause: error }
             )
         }
         await options.journal.remove(id)
         throw error
     }
-
+    let result: TransferResult
     try {
-        await tracker.enter('releasing')
-        await inspectDestinationPath(base, destination, 'restore', destinationDirectories)
-        const restoredIdentity = stagingIdentity
-        if (!restoredIdentity) throw new Error(`The identity of ${original} could not be verified.`)
-        await removeTree(
-            destination,
-            manifest,
-            relocated.identity,
-            async () => {
-                await inspectDirectoryPath(dirname(original), originalParents)
-                await requireDirectoryIdentity(original, restoredIdentity)
-                await verifyTree(original, manifest)
-                await requireDirectoryIdentity(original, restoredIdentity)
-                await options.afterVerifyingSurvivor?.(tracker.record())
-            },
-            { path: original, identity: restoredIdentity },
-            { guards: [...originalParents, ...destinationDirectories.slice(0, -1)], failAfter: options.failReclamationAfter }
-        )
+        result = await reclaimRetired(plan, progress)
     } catch (error) {
         throw new IncompleteTransferError(
-            `The restore of ${original} could not safely release the relocated copy at ${destination} (${errorMessage(error)}). Recovery details are in ${options.journal.location}.`,
-            tracker.record(),
+            `${transfer.original} was swapped, but reclamation failed (${errorMessage(error)}). Recovery details are in ${options.journal.location}.`,
+            plan.tracker.record(),
             { cause: error }
         )
     }
     await options.journal.remove(id)
-    return { bytes: manifest.bytes, files: manifest.files }
+    return result
+}
+
+export function moveDirectory(transfer: DirectoryTransfer, options: TransferOptions): Promise<TransferResult> {
+    return transferPath('move', transfer, options)
+}
+
+export function restoreDirectory(transfer: DirectoryTransfer, options: TransferOptions): Promise<TransferResult> {
+    return transferPath('restore', transfer, options)
 }
