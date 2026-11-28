@@ -111,7 +111,8 @@ Claude Desktop, GitHub Desktop, VS Code extensions, or verified per-user Node.js
 Vite+, npm, Bun, Scoop, and Chocolatey paths. Scoop and Vite+ carry the
 runtimes they manage, and package launchers keep their original paths. Scoop
 moves its whole folder, so its apps and their persistent data stay on one
-drive and Scoop can keep hard-linking persisted settings. Windows manages the
+drive and Scoop can keep hard-linking persisted settings. Scoop moves only
+when its folder holds nothing but Scoop's own folders. Windows manages the
 packaged app binaries.
 Migrated applications start checked. For newly checked apps, enter a
 base directory on another fixed local drive. Each path is mirrored under the base,

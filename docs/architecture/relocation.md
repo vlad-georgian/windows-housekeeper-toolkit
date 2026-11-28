@@ -91,9 +91,11 @@ record that still links to its mirror is logged.
   original path or the mirror as internal to the tree, so the source and the
   copy classify it the same way, and it refuses a link the copy would classify
   differently before anything is copied. Links keep their read-only attribute,
-  which Scoop sets with `attrib +R /L`. A custom root must hold only Scoop's
-  own folders: `apps`, `buckets`, `cache`, `persist`, `shims`, `modules` and
-  `workspace`.
+  which Scoop sets with `attrib +R /L`. Every Scoop root, the default
+  `~scoop` included, must hold only Scoop's own folders: `apps`, `buckets`,
+  `cache`, `persist`, `shims`, `modules` and `workspace`. Any other entry, even
+  a stray file, holds Scoop back with the entries listed. A root that moved
+  before this check stays restorable through its receipt.
   [Scoop folder layout](https://github.com/ScoopInstaller/Scoop/wiki/Scoop-Folder-Layout)
 - Vite+ verifies the launcher and active release manifest before moving its
   managed releases and runtimes. The shared launcher directory stays in place.

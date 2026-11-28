@@ -63,15 +63,19 @@ function rootEntries(root: string): string[] | { blocked: string } | null {
     }
 }
 
+/** Scoop's catalog identity, shared with the catalog's fallback when reading its configuration fails. */
+export const scoopApp = { id: 'scoop', label: 'Scoop', processGuardId: 'scoop-relocation', recordedHardLinks: 'refuse-external' } as const
+
 export function scoopRelocation(paths: SystemPaths, env: PackageEnvironment): RelocatableApp {
     const roots = scoopRoots(paths, env)
-    const app = { id: 'scoop', label: 'Scoop', processGuardId: 'scoop-relocation', recordedHardLinks: 'refuse-external' as const }
+    const app = scoopApp
     if ('blocked' in roots.root) return { ...app, blocked: roots.root.blocked, paths: [] }
     if ('blocked' in roots.global) return { ...app, blocked: roots.global.blocked, paths: [] }
     const root = userPath(roots.root.path, paths)
     const global = roots.global.path
     if (!root || overlaps(root, global)) return { ...app, paths: [] }
-    // A custom root can be a shared folder. Only a folder with Scoop's own layout moves as Scoop.
+    // Any Scoop root, the default `~scoop` included, moves only when it holds Scoop's own folders.
+    // A custom root can be a shared folder, and a stray file anywhere would move as Scoop's data.
     const names = rootEntries(root)
     if (names && 'blocked' in names) return { ...app, blocked: names.blocked, paths: [] }
     const problem = names && layoutProblem(root, names)

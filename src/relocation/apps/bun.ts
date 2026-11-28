@@ -112,8 +112,11 @@ function bunLocations(paths: SystemPaths, env: PackageEnvironment) {
     }
 }
 
+/** Bun's catalog identity, shared with the catalog's fallback when reading its configuration fails. */
+export const bunApp = { id: 'bun', label: 'Bun', processGuardId: 'bun-relocation', recordedHardLinks: 'report-external' } as const
+
 export function bunRelocation(paths: SystemPaths, env: PackageEnvironment): RelocatableApp {
-    const app = { id: 'bun', label: 'Bun', processGuardId: 'bun-relocation', recordedHardLinks: 'report-external' as const }
+    const app = bunApp
     const locations = bunLocations(paths, env)
     if ('blocked' in locations) return { ...app, blocked: locations.blocked, paths: [] }
     for (const location of Object.values(locations)) if ('blocked' in location) return { ...app, blocked: location.blocked, paths: [] }

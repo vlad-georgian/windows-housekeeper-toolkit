@@ -365,6 +365,16 @@ test('a custom Scoop root that holds more than Scoop is refused', async () => {
     expect(prompts.checklists).toHaveLength(0)
 })
 
+test('the default Scoop root is held back by a stray entry too', async () => {
+    const { root } = await scoopLayout()
+    await sandbox.file('Users/test/scoop/Notes.TXT', 'stray')
+    const prompts = new FakePrompts([[]])
+
+    expect(await relocation().operation.gather(prompts)).toBeNull()
+    expect(prompts.logs).toContain(`Scoop cannot be relocated. ${root} holds more than Scoop: Notes.TXT`)
+    expect(prompts.checklists).toHaveLength(0)
+})
+
 test(
     'a relocated npm path stays restorable after its last global package is removed',
     async () => {
