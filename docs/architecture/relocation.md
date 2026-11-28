@@ -86,6 +86,14 @@ record that still links to its mirror is logged.
   the root's link. Scoop is held back while a file in the root has a hard-link
   name outside it. Planning checks this, and the transfer checks the same
   snapshot it verifies and reclaims.
+  Receipt-only restores keep that policy. While relocated, Scoop spells new
+  junctions through its original root. A transfer treats a payload under the
+  original path or the mirror as internal to the tree, so the source and the
+  copy classify it the same way, and it refuses a link the copy would classify
+  differently before anything is copied. Links keep their read-only attribute,
+  which Scoop sets with `attrib +R /L`. A custom root must hold only Scoop's
+  own folders: `apps`, `buckets`, `cache`, `persist`, `shims`, `modules` and
+  `workspace`.
   [Scoop folder layout](https://github.com/ScoopInstaller/Scoop/wiki/Scoop-Folder-Layout)
 - Vite+ verifies the launcher and active release manifest before moving its
   managed releases and runtimes. The shared launcher directory stays in place.

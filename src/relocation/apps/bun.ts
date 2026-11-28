@@ -113,7 +113,7 @@ function bunLocations(paths: SystemPaths, env: PackageEnvironment) {
 }
 
 export function bunRelocation(paths: SystemPaths, env: PackageEnvironment): RelocatableApp {
-    const app = { id: 'bun', label: 'Bun', processGuardId: 'bun-relocation' }
+    const app = { id: 'bun', label: 'Bun', processGuardId: 'bun-relocation', recordedHardLinks: 'report-external' as const }
     const locations = bunLocations(paths, env)
     if ('blocked' in locations) return { ...app, blocked: locations.blocked, paths: [] }
     for (const location of Object.values(locations)) if ('blocked' in location) return { ...app, blocked: location.blocked, paths: [] }

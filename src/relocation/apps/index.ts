@@ -18,7 +18,7 @@ import { vscodeExtensionsRelocation } from './vscode.ts'
  * A package manager whose configuration is read while the catalog is built. An unexpected
  * error refuses only that manager, so the launch menu, cleanup and dry runs still start.
  */
-function packageManager(app: Pick<RelocatableApp, 'id' | 'label' | 'processGuardId'>, build: () => RelocatableApp): RelocatableApp {
+function packageManager(app: Pick<RelocatableApp, 'id' | 'label' | 'processGuardId' | 'recordedHardLinks'>, build: () => RelocatableApp): RelocatableApp {
     try {
         return build()
     } catch (error) {
@@ -38,11 +38,11 @@ export function createRelocationCatalog(paths: SystemPaths, sources: PackageSour
         codexRelocation(paths),
         claudeCodeRelocation(paths),
         claudeDesktopRelocation(paths),
-        packageManager({ id: 'scoop', label: 'Scoop', processGuardId: 'scoop-relocation' }, () => scoopRelocation(paths, env)),
+        packageManager({ id: 'scoop', label: 'Scoop', processGuardId: 'scoop-relocation', recordedHardLinks: 'refuse-external' }, () => scoopRelocation(paths, env)),
         packageManager({ id: 'vite-plus', label: 'Vite+', processGuardId: 'vite-plus-relocation' }, () => vitePlusRelocation(paths, env)),
         nodejsRelocation(paths),
         packageManager({ id: 'npm', label: 'npm', processGuardId: 'npm-cache' }, () => npmRelocation(paths, env)),
-        packageManager({ id: 'bun', label: 'Bun', processGuardId: 'bun-relocation' }, () => bunRelocation(paths, env)),
+        packageManager({ id: 'bun', label: 'Bun', processGuardId: 'bun-relocation', recordedHardLinks: 'report-external' }, () => bunRelocation(paths, env)),
         packageManager({ id: 'chocolatey', label: 'Chocolatey (per-user)', processGuardId: 'chocolatey-cache' }, () => chocolateyRelocation(paths, env, sources.machineChocolatey))
     ]
 }

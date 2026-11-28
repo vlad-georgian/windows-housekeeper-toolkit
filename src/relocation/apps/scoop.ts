@@ -1,7 +1,8 @@
-import { realpath } from 'node:fs/promises'
+import { readdirSync } from 'node:fs'
+import { readdir, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { isPathInside, isUnavailablePath } from '../../core/filesystem/paths.ts'
+import { hasErrorCode, isPathInside, isUnavailablePath } from '../../core/filesystem/paths.ts'
 import type { SystemPaths } from '../../core/system-paths.ts'
 import type { RelocatableApp } from '../types.ts'
 import { type ConfiguredPath, directEntry, environmentValue, isRecord, overlaps, type PackageEnvironment, readConfigFile, userPath } from './package-evidence.ts'
@@ -40,14 +41,41 @@ export function scoopRoots(paths: SystemPaths, env: PackageEnvironment): ScoopRo
     return { root: choose('SCOOP', 'root_path', join(paths.home, 'scoop')), global: choose('SCOOP_GLOBAL', 'global_path', join(paths.programData, 'scoop')) }
 }
 
+/** Scoop's own top-level folders. A root with anything else holds more than Scoop. */
+const scoopEntries = new Set(['apps', 'buckets', 'cache', 'persist', 'shims', 'modules', 'workspace'])
+
+function unexpectedEntries(names: readonly string[]): string[] {
+    return names.filter((name) => !scoopEntries.has(name.toLowerCase()))
+}
+
+function layoutProblem(root: string, names: readonly string[]): string | null {
+    const unexpected = unexpectedEntries(names)
+    return unexpected.length > 0 ? `${root} holds more than Scoop: ${unexpected.join(', ')}` : null
+}
+
+/** The root's entries while the catalog is built, or `null` when the root does not exist. */
+function rootEntries(root: string): string[] | { blocked: string } | null {
+    try {
+        return readdirSync(root)
+    } catch (error) {
+        if (hasErrorCode(error, 'ENOENT', 'ENOTDIR')) return null
+        return { blocked: `Could not list ${root}` }
+    }
+}
+
 export function scoopRelocation(paths: SystemPaths, env: PackageEnvironment): RelocatableApp {
     const roots = scoopRoots(paths, env)
-    const app = { id: 'scoop', label: 'Scoop', processGuardId: 'scoop-relocation' }
+    const app = { id: 'scoop', label: 'Scoop', processGuardId: 'scoop-relocation', recordedHardLinks: 'refuse-external' as const }
     if ('blocked' in roots.root) return { ...app, blocked: roots.root.blocked, paths: [] }
     if ('blocked' in roots.global) return { ...app, blocked: roots.global.blocked, paths: [] }
     const root = userPath(roots.root.path, paths)
     const global = roots.global.path
     if (!root || overlaps(root, global)) return { ...app, paths: [] }
+    // A custom root can be a shared folder. Only a folder with Scoop's own layout moves as Scoop.
+    const names = rootEntries(root)
+    if (names && 'blocked' in names) return { ...app, blocked: names.blocked, paths: [] }
+    const problem = names && layoutProblem(root, names)
+    if (problem) return { ...app, blocked: problem, paths: [] }
     return {
         ...app,
         paths: [
@@ -59,6 +87,7 @@ export function scoopRelocation(paths: SystemPaths, env: PackageEnvironment): Re
                 // volume. A hard link that reaches outside the root cannot follow it.
                 hardLinks: 'refuse-external',
                 async verifyDirectory(target) {
+                    if (unexpectedEntries(await readdir(target)).length > 0) return false
                     const releases = join(target, 'apps', 'scoop')
                     if (!(await directEntry(releases, 'directory'))) return false
                     try {

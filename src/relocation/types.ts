@@ -34,6 +34,8 @@ export interface RelocatableApp {
     readonly processGuardId: string
     readonly label: string
     readonly preserveMirror?: boolean
+    /** The hard-link policy for paths known only from the toolkit's receipts, such as a restore while the app is blocked. */
+    readonly recordedHardLinks?: RelocationPath['hardLinks']
     /** Why the app's active locations cannot be determined. The app is not offered. */
     readonly blocked?: string
     readonly paths: readonly RelocationPath[]

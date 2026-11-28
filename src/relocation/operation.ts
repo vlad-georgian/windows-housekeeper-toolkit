@@ -185,7 +185,7 @@ function isActionRunning(action: AppAction, processes: readonly WindowsProcess[]
 async function hardLinkPlan(app: RelocatableApp, transfers: readonly PathTransfer[]): Promise<{ readonly lines: readonly string[] } | { readonly blocked: string }> {
     const moving = transfers
         .filter((entry) => !entry.retained && entry.kind === 'directory')
-        .map((entry) => ({ entry, policy: app.paths.find((path) => path.path === entry.original)?.hardLinks, physical: entry.originalLink?.target ?? entry.original }))
+        .map((entry) => ({ entry, policy: catalogPath(app, entry.original)?.hardLinks, physical: entry.originalLink?.target ?? entry.original }))
     if (!moving.some(({ policy }) => policy)) return { lines: [] }
     let external
     try {
@@ -374,7 +374,7 @@ async function applyAction(action: AppAction, prompts: LaunchPrompts, options: R
                     throw new UnverifiedPathError(`${original} no longer links directly to the verified destination ${destination}`)
                 continue
             }
-            const entry = app.paths.find((path) => path.path === original)
+            const entry = catalogPath(app, original)
             const physical = source.originalLink?.target ?? original
             if (entry?.verifyFile && !(await entry.verifyFile(physical))) throw new Error(`Could not verify the app owns ${original}.`)
             if (recordedOnly) {
@@ -464,13 +464,20 @@ async function recordedKind(receipt: MirrorOwner): Promise<'file' | undefined> {
     }
 }
 
+function catalogPath(app: RelocatableApp, path: string): RelocationPath | undefined {
+    return app.paths.find((entry) => canonicalPathKey(entry.path) === canonicalPathKey(path))
+}
+
 /** The paths this app relocated, from the toolkit's receipts, as restore-only catalog paths. */
 async function recordedPaths(app: RelocatableApp, receipts: ReadonlyMap<string, MirrorOwner>): Promise<RelocationPath[]> {
     const paths: RelocationPath[] = []
     for (const [key, receipt] of receipts) {
         if (receipt.appId !== app.id || receipt.forwarding) continue
         const kind = await recordedKind(receipt)
-        paths.push({ path: receipt.original ?? key, description: 'relocated path', recordedOnly: true, ...(kind && { kind }) })
+        const path = receipt.original ?? key
+        // A recorded path keeps the policy its catalog path had, even while the app is blocked.
+        const hardLinks = catalogPath(app, path)?.hardLinks ?? app.recordedHardLinks
+        paths.push({ path, description: 'relocated path', recordedOnly: true, ...(kind && { kind }), ...(hardLinks && { hardLinks }) })
     }
     return paths
 }
@@ -494,7 +501,14 @@ async function inspectWithReceipts(
     if (!quiet) prompts.log(`${app.label} cannot be relocated. ${inspection.blocked}`)
     if (recorded.length === 0) return null
     // Blocking stops a new move, never a restore of what the toolkit already relocated.
-    const restoreOnly: RelocatableApp = { id: app.id, label: app.label, processGuardId: app.processGuardId, paths: recorded, ...(app.preserveMirror && { preserveMirror: true }) }
+    const restoreOnly: RelocatableApp = {
+        id: app.id,
+        label: app.label,
+        processGuardId: app.processGuardId,
+        paths: recorded,
+        ...(app.preserveMirror && { preserveMirror: true }),
+        ...(app.recordedHardLinks && { recordedHardLinks: app.recordedHardLinks })
+    }
     const fallback = await inspectApp(restoreOnly, options.home, validation)
     if ('blocked' in fallback) {
         if (!quiet) prompts.log(`${app.label}'s relocated paths cannot be restored yet. ${fallback.blocked}`)

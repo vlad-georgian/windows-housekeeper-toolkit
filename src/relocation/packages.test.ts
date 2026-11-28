@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { link, lstat, mkdtemp, readFile, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises'
+import { link, lstat, mkdtemp, readdir, readFile, readlink, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { cancelled, type PlanSection } from '../launch/types.ts'
@@ -14,6 +14,7 @@ import { createRecoveryJournal } from './journal.ts'
 import { differentVolumes } from './layout.ts'
 import { createRelocationOperation, type RelocationEvent, toolkitProcessIds } from './operation.ts'
 import { DestinationConflictError, moveDirectory, UnsupportedTreeError } from './transfer.ts'
+import { inconsistentLink, type TreeManifest } from './tree.ts'
 import type { RelocatableApp } from './types.ts'
 
 // Each full move or restore reads Windows permissions through PowerShell several times.
@@ -258,6 +259,110 @@ test('an interrupted Scoop swap puts back the exact release and persist junction
     expect(await identities()).toEqual(before)
     expect(await realpath(join(foo, 'data'))).toBe(persist)
     expect(await journal.list()).toEqual([])
+})
+
+/** Marks a link itself read-only, as Scoop's `link_current` and `persist_data` do. */
+function guardLink(path: string): void {
+    const result = Bun.spawnSync(['attrib.exe', '+R', path, '/L'])
+    if (result.exitCode !== 0) throw new Error(`attrib failed for ${path}`)
+}
+
+async function readOnlyLink(path: string): Promise<boolean> {
+    const stats = await lstat(path)
+    return stats.isSymbolicLink() && (stats.mode & 0o200) === 0
+}
+
+test(
+    'Scoop restores after it relinks current and persisted data through the original path while relocated',
+    async () => {
+        const { root, apps, persist, foo } = await scoopLayout()
+        for (const junction of [join(foo, '..', 'current'), join(foo, 'data')]) guardLink(junction)
+        disposableDestination = otherVolume ? await mkdtemp(join(otherVolume, 'housekeeper-test-')) : undefined
+        const base = join(disposableDestination ?? sandbox.root, 'Software')
+        const mirror = join(base, 'test', 'scoop')
+        const { operation, events } = relocation({ crossVolume: !!otherVolume })
+
+        await planned(await operation.gather(new FakePrompts([['scoop'], base]))).apply()
+        expect(await realpath(root)).toBe(mirror)
+        for (const junction of [join(mirror, 'apps', 'foo', 'current'), join(mirror, 'apps', 'foo', '1', 'data')]) expect(await readOnlyLink(junction)).toBe(true)
+
+        // `scoop update bar` while relocated: Scoop spells every new junction through its original root.
+        const version = join(apps, 'bar', '2')
+        await sandbox.file('Users/test/scoop/apps/bar/2/bar.exe', 'bar 2')
+        await sandbox.directory('Users/test/scoop/persist/bar')
+        await symlink(version, join(apps, 'bar', 'current'), 'junction')
+        await symlink(join(root, 'persist', 'bar'), join(version, 'data'), 'junction')
+        for (const junction of [join(apps, 'bar', 'current'), join(version, 'data')]) guardLink(junction)
+        await writeFile(join(version, 'data', 'settings.ini'), 'bar settings')
+
+        await planned(await operation.gather(new FakePrompts([[]]))).apply()
+
+        expect(events.map((event) => event.kind)).toEqual(['moved', 'restored'])
+        expect((await lstat(root)).isSymbolicLink()).toBe(false)
+        expect(await readlink(join(apps, 'bar', 'current'))).toBe(version)
+        expect(await realpath(join(apps, 'bar', 'current'))).toBe(version)
+        expect(await realpath(join(version, 'data'))).toBe(join(root, 'persist', 'bar'))
+        expect(await realpath(join(foo, 'data'))).toBe(persist)
+        expect(await readFile(join(root, 'persist', 'bar', 'settings.ini'), 'utf8')).toBe('bar settings')
+        for (const junction of [join(foo, '..', 'current'), join(foo, 'data'), join(apps, 'bar', 'current'), join(version, 'data')]) expect(await readOnlyLink(junction)).toBe(true)
+        expect((await readdir(sandbox.paths.home)).filter((name) => name.includes('windows-housekeeper-toolkit'))).toEqual([])
+        expect(await createRecoveryJournal(sandbox.paths).list()).toEqual([])
+    },
+    transferTimeout
+)
+
+test('a link the copy would classify differently is refused before anything is copied', () => {
+    const finalRoot = join(sandbox.root, 'original')
+    const entry = { identity: 'link', kind: 'junction' as const, bytes: 0, links: 1, hash: null, readOnly: false, alias: null }
+    const manifest = (internal: boolean, target: string): TreeManifest => ({
+        root: join(sandbox.root, 'mirror'),
+        permissions: [],
+        bytes: 0,
+        files: 0,
+        entries: [
+            { ...entry, path: '', kind: 'directory', target: null, internal: false },
+            { ...entry, path: 'current', target, internal }
+        ]
+    })
+
+    expect(inconsistentLink(manifest(false, join(finalRoot, 'apps', '2')), finalRoot)).toBe(join(sandbox.root, 'mirror', 'current'))
+    expect(inconsistentLink(manifest(true, join('apps', '2')), finalRoot)).toBeNull()
+    expect(inconsistentLink(manifest(false, join(sandbox.root, 'elsewhere')), finalRoot)).toBeNull()
+})
+
+test(
+    'a restore from receipts while Scoop’s configuration is unreadable still refuses outside hard links',
+    async () => {
+        const { root } = await scoopLayout()
+        const persisted = await sandbox.file('Users/test/scoop/persist/foo/config.ini', 'original')
+        const base = join(sandbox.root, 'Software')
+        await planned(await relocation().operation.gather(new FakePrompts([['scoop'], base]))).apply()
+        const outside = join(base, 'outside.ini')
+        await link(persisted, outside)
+        await sandbox.file('Users/test/.config/scoop/config.json', '{ broken')
+
+        const { operation, events } = relocation()
+        const prompts = new FakePrompts([[]])
+        expect(await operation.gather(prompts)).toBeNull()
+
+        expect(prompts.logs.some((message) => message.startsWith('Scoop cannot be restored: ') && message.includes('is hard-linked to a name outside'))).toBe(true)
+        expect(events).toEqual([])
+        expect((await lstat(root)).isSymbolicLink()).toBe(true)
+        expect((await lstat(outside)).nlink).toBe(2)
+    },
+    transferTimeout
+)
+
+test('a custom Scoop root that holds more than Scoop is refused', async () => {
+    const root = await sandbox.directory('Users/test/tools')
+    await sandbox.file('Users/test/tools/apps/scoop/1/bin/scoop.ps1', '# Scoop fixture')
+    await symlink(join(root, 'apps', 'scoop', '1'), join(root, 'apps', 'scoop', 'current'), 'junction')
+    await sandbox.file('Users/test/tools/projects/app/readme.md', 'not Scoop')
+    const prompts = new FakePrompts([[]])
+
+    expect(await relocation({ env: { SCOOP: root } }).operation.gather(prompts)).toBeNull()
+    expect(prompts.logs).toContain(`Scoop cannot be relocated. ${root} holds more than Scoop: projects`)
+    expect(prompts.checklists).toHaveLength(0)
 })
 
 test(
