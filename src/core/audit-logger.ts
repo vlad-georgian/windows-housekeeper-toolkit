@@ -5,6 +5,7 @@ import { projectName } from './state.ts'
 import type { CleanupCandidate, RemovedEntry, SkippedEntry } from './types.ts'
 
 type AuditDetails = Record<string, unknown>
+type RelocationAuditKind = 'moved' | 'restored' | 'previewed' | 'skipped' | 'failed'
 
 export class AuditLogger {
     private constructor(readonly path: string) {}
@@ -107,6 +108,10 @@ export class AuditLogger {
             path: entry.path,
             reason: entry.reason
         })
+    }
+
+    async recordRelocation(kind: RelocationAuditKind, details: AuditDetails): Promise<void> {
+        await this.write(`relocation-${kind}`, details)
     }
 
     async recordStartupEnforcement(messages: readonly string[], failures: number): Promise<void> {

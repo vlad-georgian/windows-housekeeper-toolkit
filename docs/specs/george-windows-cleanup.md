@@ -12,7 +12,7 @@ Rename the project and its workspace folder to `windows-housekeeper-toolkit`. Re
 
 Add reversible app startup controls and manage verified background update mechanisms for Codex, Claude, T3 Code, and OpenCode by installation type. Give sign-in cleanup and startup preference enforcement independent switches. Sign-in cleanup runs for a selected set of apps and posts one Windows notification per run.
 
-Offer data migration for verified, eligible files with a documented app redirect. Keep protected data in place. Verify the copy and redirect before reclaiming space in the same command, and support rollback from the latest destination copy.
+Offer reversible application relocation for verified per-user installation and data paths. Keep protected data in place. Verify the copy and the links at the original paths before reclaiming space, and restore from the latest destination copy.
 
 ## User Stories
 
@@ -46,37 +46,37 @@ Offer data migration for verified, eligible files with a documented app redirect
 28. As a Windows user, I want one notification after every sign-in cleanup, including an empty run, so that I know the job finished.
 29. As a Windows user, I want the notification to show which apps were cleaned, the space reclaimed, and any failures, so that I can understand the result at a glance.
 30. As a Windows user, I want the notification to link to the audit log, so that I can inspect the full result.
-31. As a Windows user, I want the CLI to report useful migration candidates and existing redirects, so that I can decide what is worth moving.
-32. As a Windows user, I want to select a destination directory for each move, so that I can decide where to use the available disk space.
-33. As a Windows user, I want the CLI to migrate only files it can redirect through a documented app setting, so that the app can use the new location through its supported configuration.
-34. As a Windows user, I want the move to verify the copy and redirect before reclaiming the source space, so that the files remain usable after the command completes.
+31. As a Windows user, I want the checklist to show which applications are available for relocation and which are already migrated, so that I can decide what is worth moving.
+32. As a Windows user, I want to select a relocation base for the apps I move, so that I can decide where to use the available disk space.
+33. As a Windows user, I want only verified per-user app paths to be relocated, with links at the original locations so the app can keep using those paths.
+34. As a Windows user, I want the move to verify the copy and each link before reclaiming source space, so that the files remain usable after the command completes.
 35. As a Windows user, I want a successful move to reclaim source space in the same command, so that I get the disk-space benefit immediately.
 36. As a Windows user, I want to roll back a move using the latest destination files, so that I can restore the original location without losing subsequent changes.
-37. As a Windows user, I want worktrees, conversations, generated outputs, and other protected data to stay in place during migration, so that existing projects and sessions keep working.
+37. As a Windows user, I want worktrees, conversations, generated outputs, and other protected data to stay in place during relocation, so that existing projects and sessions keep working.
 
 ## Implementation Decisions
 
 - Rename the package, command, display name, audit-log prefix, and workspace folder. Keep the project a Windows CLI. Use Vite+ for installs, development commands, formatting, linting, and static checks. Use a project-level Bun pin and run the CLI with Bun.
 - Extend the existing cleaner catalog and reuse its detection, dry-run, removal, and audit flow. Retain manual interactive and command-line cleanup. Check existing targets against the installed variants and add only verified, narrowly scoped cleanup candidates.
 - Verify the active selection for each Codex release store separately. Preserve active and in-use versions and skip a version store if its active selection is ambiguous. Verify alternate npm locations before considering updater remnants. Inspect the OpenCode Desktop updater root and add only verified redundant files. Limit VS Code cleanup to verified regenerable caches.
-- Verify the resolved identity of cleanup and migration targets, including linked ancestors, before measuring or mutating them. Count aliases once and attribute any savings to the drive where files are stored. Preserve active installs, settings, authentication, installed plugins, and protected data. Skip ambiguous paths.
+- Verify the resolved identity of cleanup and relocation targets, including linked ancestors, before measuring or mutating them. Count aliases once and attribute any savings to the drive where files are stored. Preserve active installs, settings, authentication, installed plugins, and protected data during cleanup. Skip ambiguous paths.
 - Manage verified app startup entries reversibly, with a way to restore the previous state. Store the user's app startup preferences for optional startup preference enforcement. Report packaged entries that require Windows Settings and guide the user there. Report app services for information and preserve their configuration.
 - Detect background update mechanisms by app and installation type. Apply a change only when the verified, app-specific control preserves updates while the app runs. Report all-or-nothing settings, unsupported mechanisms, and unverified mechanisms as such.
 - Run sign-in cleanup and startup preference enforcement in the user's Windows session. Give each its own on/off switch. Use an explicit app list for unattended cleanup, skip running apps, and reserve administrator-only driver removal for manual runs.
 - Send one Windows notification when each sign-in cleanup finishes, including runs that find nothing. Include the apps cleaned, reclaimed space, failures when present, and access to the detailed audit log.
-- Use documented app settings for data migration and require an explicit destination directory. Limit the command to files whose ownership and redirect are verified and whose move preserves protected data in place. Treat E: as a candidate destination based on available space. Report already redirected data and candidates whose redirect remains unverified.
-- Follow the [migration decision](../adr/0001-verify-migrations-before-reclaiming-source-space.md). In a single command, copy eligible files, verify the copy, record the prior setting and recovery paths, apply and verify the redirect, and reclaim source space. Retain the source if verification fails. Rollback copies and verifies the latest files back before restoring the prior setting, subject to available space.
+- Follow the [application relocation decision](../adr/0002-relocate-applications-with-directory-junctions.md). Mirror eligible per-user paths under the selected relocation base and the Windows profile name. Keep the original directory paths usable through junctions. Report destination conflicts and running applications before any data changes.
+- Verify the copy, permissions, and junction before reclaiming source space. Keep recovery records for interrupted transfers. Restore the latest contents at the original paths and verify them before reclaiming destination space. See the [expansion spec](../../.scratch/housekeeper-expansion/spec.md) for the relocation catalog and scope.
 
 ## Testing Decisions
 
 - Remove the existing automated tests and their entry points. Keep formatting, linting, and static checks in the development workflow.
 - Verify behavior through the CLI and Windows surfaces the user interacts with. Check that dry runs report the intended candidates, that verified startup preferences can be restored, and that sign-in settings operate independently.
-- Use disposable data for manual checks that require deletion, migration, or rollback. Verify protected data stays in its original location and that a failed migration verification preserves the source. Verify that the sign-in notification reports empty runs, removals, and failures and provides access to the audit log.
+- Use disposable data for checks that require deletion, relocation, or restore. Verify that protected data stays in its original location and that failed relocation verification preserves the source. Verify that the sign-in notification reports empty runs, removals, and failures and provides access to the audit log.
 
 ## Out of Scope
 
-- Cleanup or migration of worktrees, project files, conversations, generated outputs, credentials, and other protected data.
-- Moving whole profiles that include protected data, or creating directory junctions as a migration mechanism.
+- Cleanup or relocation of worktrees, project files, conversations, generated outputs, credentials, and other protected data.
+- Moving whole profiles that include protected data.
 - Changes to Windows service startup, system-wide update policy, and update settings that would also suppress updates while an app runs.
 - Cleanup before Windows sign-in or unattended administrator-only driver removal.
 - A replacement automated test suite.

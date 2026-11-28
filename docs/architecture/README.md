@@ -14,7 +14,8 @@ state.
 | [`src/cleanup/`](cleanup.md)                   | Cleanup categories and operations, unattended and sign-in cleanup, from detection through the audit summary.             |
 | [`src/cleaners/`](cleaners.md)                 | App-specific rules for recognizing and removing redundant payloads.                                                      |
 | [`src/core/`](core.md)                         | Shared types, filesystem verification, state, command execution, and formatting.                                         |
-| [`src/windows/`](windows.md)                   | Startup, updates, scheduled tasks, notifications, process inspection, and migration.                                     |
+| [`src/relocation/`](relocation.md)             | Application relocation: catalog, inspection, verified move and restore, and recovery records.                            |
+| [`src/windows/`](windows.md)                   | Startup, updates, scheduled tasks, notifications, and process inspection.                                                |
 | [`src/test-support/`](../../src/test-support/) | Disposable sandbox profiles, Codex release fixtures, and scripted prompts for tests. Tests never touch the real profile. |
 
 The launch menu (`src/launch/`) starts with every operation unchecked. Each
@@ -28,5 +29,5 @@ processes during scanning and before removal.
 
 State lives under `%LOCALAPPDATA%\windows-housekeeper-toolkit`. A named-pipe lock
 scoped to that directory serializes operations. State writes use a temporary
-file and rename, and the migration journal records phases for resume and
-rollback.
+file and rename, and the relocation recovery journal records each transfer
+phase so an interrupted move or restore can be recovered.

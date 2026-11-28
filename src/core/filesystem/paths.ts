@@ -40,8 +40,22 @@ export function isPathInside(path: string, root: string): boolean {
     return difference !== '' && difference !== '..' && !difference.startsWith(`..${sep}`) && !isAbsolute(difference)
 }
 
-export function entryIdentity(stats: BigIntStats): string {
-    return `${stats.dev}:${stats.ino}:${stats.birthtimeNs}`
+/**
+ * The Windows file ID as an unsigned 64-bit number. Bun reports IDs with the high bit set as
+ * negative, while Windows APIs and the native guard report them unsigned.
+ */
+export function fileIndex(stats: Pick<BigIntStats, 'ino'>): bigint {
+    return BigInt.asUintN(64, stats.ino)
+}
+
+/** The volume serial number as Windows reports it: an unsigned 32-bit number. */
+export function volumeSerial(stats: Pick<BigIntStats, 'dev'>): bigint {
+    return BigInt.asUintN(32, stats.dev)
+}
+
+/** Volume, file ID, and creation time, in the unsigned form the native guard also prints. */
+export function entryIdentity(stats: Pick<BigIntStats, 'dev' | 'ino' | 'birthtimeNs'>): string {
+    return `${volumeSerial(stats)}:${fileIndex(stats)}:${stats.birthtimeNs}`
 }
 
 export async function inspectCanonicalEntry(path: string, linkCount = 1n): Promise<BigIntStats> {

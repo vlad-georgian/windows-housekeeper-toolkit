@@ -2,7 +2,7 @@
     "name": "windows-housekeeper-toolkit",
     "version": "0.1.0",
     "private": true,
-    "description": "Windows application cleanup, startup preferences, and data migration.",
+    "description": "Windows application cleanup, startup preferences, and application relocation.",
     "bin": {
         "windows-housekeeper-toolkit": "./src/index.ts"
     },

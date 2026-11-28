@@ -48,7 +48,7 @@ export function parseCliOptions(arguments_: readonly string[]): CliOptions {
         version: '0.1.0',
         completion: 'both',
         brief: message`Safely remove redundant Windows application payloads.`,
-        description: message`Run without --category to choose operations and apps interactively. Categories: general-cache, destructive-cache, windows-temp, old-installations. For Windows controls, see startup --help, updates --help, signin --help, and migration --help.`,
+        description: message`Run without --category to choose operations and apps interactively. Categories: general-cache, destructive-cache, windows-temp, old-installations. For Windows controls, see startup --help, updates --help, and signin --help.`,
         showUsage: true
     })
 }
