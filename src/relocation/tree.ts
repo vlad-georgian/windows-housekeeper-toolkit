@@ -5,6 +5,7 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 
 import { canonicalPathKey, entryIdentity, isPathInside } from '../core/filesystem/paths.ts'
 import { readWindowsFilePermissions } from '../windows/file-permissions.ts'
+import { reparsePointKind } from '../windows/kernel32.ts'
 import { nativeEntryIdentity, readReparsePermissions, reclaimWindowsTree, type ReclamationEntry, type ReclamationGuard, type ReparseLink } from '../windows/reclaim-tree.ts'
 import { inspectDirectoryPath, type DirectoryIdentity } from './directory-path.ts'
 
@@ -68,6 +69,22 @@ async function linkTargetStats(root: string, representedRoot: string, initialTar
     return stat(canonicalPathKey(target) === canonicalPathKey(representedRoot) ? root : target)
 }
 
+/** Relocation recreates junctions to directories and file symbolic links to files. Anything else is reported while planning. */
+function supportedLinkKind(path: string, directoryTarget: boolean): 'junction' | 'symlink' {
+    const kind = reparsePointKind(path)
+    if (kind === 'junction' && directoryTarget) return 'junction'
+    if (kind === 'file-symlink' && !directoryTarget) return 'symlink'
+    const description =
+        kind === 'directory-symlink'
+            ? 'a directory symbolic link'
+            : kind === 'file-symlink'
+              ? 'a file symbolic link to a directory'
+              : kind === 'junction'
+                ? 'a junction to a file'
+                : 'an unsupported reparse point'
+    throw new UnsupportedTreeError(`${path} is ${description}. Only junctions to folders and file symbolic links to files can be relocated.`)
+}
+
 /** Inventory the root itself (which may be a launcher file), then its children without descending into links. */
 async function inventory(root: string, representedRoot: string, hashContents: boolean): Promise<Omit<TreeManifest, 'permissions'>> {
     const entries: TreeEntry[] = []
@@ -88,7 +105,7 @@ async function inventory(root: string, representedRoot: string, hashContents: bo
             // A staging copy may contain a junction addressed to its final name. Inspect its counterpart in staging.
             const backing = await linkTargetStats(root, representedRoot, targetPath).catch(() => null)
             if (!backing || (!backing.isDirectory() && !backing.isFile())) throw new UnsupportedTreeError(`${absolute} is a link with an unavailable target.`)
-            entries.push({ ...common, kind: backing.isDirectory() ? 'junction' : 'symlink', target, internal, payload: raw })
+            entries.push({ ...common, kind: supportedLinkKind(absolute, backing.isDirectory()), target, internal, payload: raw })
             return
         }
         if (canonicalPathKey(await realpath(absolute)) !== canonicalPathKey(absolute)) throw new UnsupportedTreeError(`${absolute} has a linked parent.`)
@@ -147,22 +164,35 @@ export async function verifyTreeContents(root: string, manifest: TreeManifest, r
     if (actual.entries.length !== manifest.entries.length) throw new Error(`Verification failed at ${root}: entry count changed.`)
     for (const [index, entry] of manifest.entries.entries()) {
         const other = actual.entries[index]
-        if (
-            !other ||
-            entry.path !== other.path ||
-            entry.kind !== other.kind ||
-            entry.hash !== other.hash ||
-            entry.bytes !== other.bytes ||
-            entry.readOnly !== other.readOnly ||
-            entry.alias !== other.alias ||
-            entry.target !== other.target ||
-            entry.internal !== other.internal ||
-            (sameObjects && (entry.identity !== other.identity || entry.payload !== other.payload))
-        ) {
+        if (!other || !sameContent(entry, other) || entry.target !== other.target || (sameObjects && (entry.identity !== other.identity || entry.payload !== other.payload))) {
             throw new Error(`Verification failed: ${join(root, entry.path)} differs.`)
         }
     }
     return { ...actual, permissions: manifest.permissions }
+}
+
+function sameContent(entry: TreeEntry, other: TreeEntry): boolean {
+    return (
+        entry.path === other.path &&
+        entry.kind === other.kind &&
+        entry.hash === other.hash &&
+        entry.bytes === other.bytes &&
+        entry.readOnly === other.readOnly &&
+        entry.alias === other.alias &&
+        entry.internal === other.internal
+    )
+}
+
+/** A survivor manifest supplied by the caller must describe the retiring contents. Only an external link
+ * target may differ, because planning can remap it to the relocated store. */
+function requireCopyOf(retiring: TreeManifest, survivor: TreeManifest, root: string): void {
+    const matches =
+        retiring.entries.length === survivor.entries.length &&
+        retiring.entries.every((entry, index) => {
+            const other = survivor.entries[index]
+            return other && sameContent(entry, other) && (entry.internal ? entry.target === other.target : (entry.target === null) === (other.target === null))
+        })
+    if (!matches) throw new Error(`The surviving copy at ${root} does not match the copy being reclaimed.`)
 }
 
 function reparseLink(entry: TreeEntry): ReparseLink | undefined {
@@ -330,7 +360,9 @@ export async function removeTree(
     const retiring = await reclamationEntries(root, verified)
     let retained: ReclamationEntry[] = []
     if (survivor) {
-        const survivorManifest = protection?.survivorManifest ?? (await verifyTreeContents(survivor.path, manifest, survivor.path))
+        const supplied = protection?.survivorManifest
+        if (supplied) requireCopyOf(manifest, supplied, survivor.path)
+        const survivorManifest = supplied ?? (await verifyTreeContents(survivor.path, manifest, survivor.path))
         if (survivorManifest.entries[0]?.identity !== survivor.identity) throw new Error(`The surviving copy at ${survivor.path} changed.`)
         retained = await reclamationEntries(survivor.path, survivorManifest)
     }

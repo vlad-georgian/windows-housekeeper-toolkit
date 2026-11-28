@@ -1,11 +1,12 @@
 import { expect, test } from 'bun:test'
-import { open, readFile, writeFile } from 'node:fs/promises'
+import { open, readFile, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import { errorMessage } from '../core/format.ts'
 import { createSandbox } from '../test-support/fixtures.ts'
-import { rejectionMessage } from '../test-support/rejection.ts'
+import { rejection, rejectionMessage } from '../test-support/rejection.ts'
 import { runPowerShell } from '../windows/powershell.ts'
-import { removeTree, snapshotTree, verifyTree } from './tree.ts'
+import { measureTree, removeTree, snapshotTree, UnsupportedTreeError, verifyTree } from './tree.ts'
 
 test.each(['added', 'modified'] as const)(
     'preserves old data %s during survivor verification',
@@ -91,3 +92,40 @@ test.each([
     },
     15_000
 )
+
+test('refuses a survivor manifest that does not describe the retiring copy', async () => {
+    const sandbox = await createSandbox()
+    try {
+        const kept = await sandbox.file('old/settings.json', 'old settings')
+        await sandbox.file('other/settings.json', 'unrelated data')
+        const root = join(sandbox.root, 'old')
+        const other = join(sandbox.root, 'other')
+        const manifest = await snapshotTree(root)
+        const survivorManifest = await snapshotTree(other)
+        const survivor = { path: other, identity: survivorManifest.entries[0]?.identity ?? '' }
+
+        expect(await rejectionMessage(removeTree(root, manifest, manifest.entries[0]?.identity, undefined, survivor, { guards: [], survivorManifest }))).toContain(other)
+        expect(await readFile(kept, 'utf8')).toBe('old settings')
+    } finally {
+        await sandbox.dispose()
+    }
+}, 15_000)
+
+test.each([
+    { link: 'a directory symbolic link', type: 'dir', reason: 'directory symbolic link' },
+    { link: 'a file symbolic link to a directory', type: 'file', reason: 'file symbolic link to a directory' }
+] as const)('planning blocks $link with a readable reason', async ({ type, reason }) => {
+    const sandbox = await createSandbox()
+    try {
+        const root = await sandbox.directory('app')
+        const target = await sandbox.directory('elsewhere')
+        await symlink(target, join(root, 'linked'), type)
+
+        const error = await rejection(measureTree(root))
+        expect(error).toBeInstanceOf(UnsupportedTreeError)
+        expect(errorMessage(error)).toContain(join(root, 'linked'))
+        expect(errorMessage(error)).toContain(reason)
+    } finally {
+        await sandbox.dispose()
+    }
+})

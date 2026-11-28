@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { entryIdentity, hasErrorCode, pathExists } from '../core/filesystem/paths.ts'
 import { createSandbox, type Sandbox } from '../test-support/fixtures.ts'
 import { rejection } from '../test-support/rejection.ts'
-import { moveExclusive } from './exclusive-move.ts'
+import { moveExclusive, type ReparsePointKind, reparsePointKind } from './kernel32.ts'
 
 let sandbox: Sandbox
 beforeEach(async () => {
@@ -13,7 +13,7 @@ beforeEach(async () => {
 })
 afterEach(async () => sandbox.dispose())
 
-describe('moving an entry exclusively', () => {
+describe('native file operations', () => {
     test('refuses to replace an existing file and leaves both names intact', async () => {
         const from = await sandbox.file('aside', 'previous')
         const to = await sandbox.file('original', 'written by the app')
@@ -34,6 +34,23 @@ describe('moving an entry exclusively', () => {
         expect(entryIdentity(await lstat(to, { bigint: true }))).toBe(identity)
         expect(await readlink(to)).toBe(target)
         expect(await readFile(target, 'utf8')).toBe('data')
+    })
+
+    test('classifies each link by its stored reparse tag without following it', async () => {
+        const directory = await sandbox.directory('folder')
+        const file = await sandbox.file('file', 'data')
+        const links: readonly (readonly [ReparsePointKind, string, 'junction' | 'dir' | 'file'])[] = [
+            ['junction', directory, 'junction'],
+            ['directory-symlink', directory, 'dir'],
+            ['file-symlink', file, 'file']
+        ]
+        for (const [kind, target, type] of links) {
+            const path = join(sandbox.root, kind)
+            await symlink(target, path, type)
+            expect(reparsePointKind(path)).toBe(kind)
+        }
+        expect(reparsePointKind(directory)).toBeNull()
+        expect(reparsePointKind(file)).toBeNull()
     })
 
     test('refuses to replace an existing file symlink', async () => {
